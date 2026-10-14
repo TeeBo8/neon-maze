@@ -168,16 +168,6 @@ static void platform_init(void)
 
 static void platform_restore(void)
 {
-    /* Le doigt est souvent encore sur Échap ou Ctrl+C : on attend qu'il se
-     * lève (1 s maximum), puis on jette les touches non lues pour qu'elles
-     * n'arrivent pas dans le terminal après la sortie. */
-    for (int i = 0; i < 100; i++) {
-        if (!(GetAsyncKeyState(VK_ESCAPE) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
-            !(GetAsyncKeyState('C') & 0x8000))
-            break;
-        Sleep(10);
-    }
-    FlushConsoleInputBuffer(con_in);
     SetConsoleMode(con_in, saved_in_mode);
     SetConsoleMode(con_out, saved_out_mode);
     SetConsoleOutputCP(saved_codepage);
