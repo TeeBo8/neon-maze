@@ -27,6 +27,7 @@
 - [ ] Écran titre et fin de partie
 
 ## Phase 4 - Publication
+- [ ] GitHub Actions : compilation à 0 avertissement sur Windows, Linux et macOS à chaque PR (seule façon de vérifier la partie Linux/macOS, pas de Linux sur le PC de Leture) + badge dans le README
 - [ ] README : GIF, une commande pour compiler, explication illustrée du raycasting
 - [ ] Revue à froid
 - [ ] Repo GitHub public + description + sujets (Leture), ligne sur le profil GitHub
