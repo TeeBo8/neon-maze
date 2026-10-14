@@ -1,0 +1,9 @@
+# Exécutables et fichiers objets produits par la compilation
+*.exe
+*.o
+*.obj
+/neon-maze
+/build/
+
+# Captures et journaux des tests navigateur (Playwright)
+.playwright-mcp/
