@@ -15,6 +15,7 @@
 #endif
 
 #include <ctype.h>
+#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -58,6 +59,11 @@ enum Action {
     ACT_NONE = -1
 };
 
+/* Une couleur 24 bits : rouge, vert, bleu, chacun de 0 à 255. */
+struct Color {
+    unsigned char r, g, b;
+};
+
 /* Mis à 1 pour quitter (Échap, Ctrl+C, fermeture). « volatile sig_atomic_t »
  * est le seul type qu'un gestionnaire de signal a le droit de modifier. */
 static volatile sig_atomic_t quit_requested = 0;
@@ -66,6 +72,36 @@ static volatile sig_atomic_t quit_requested = 0;
  * l'une l'autre, le compilateur doit connaître ces fonctions à l'avance. */
 static void key_press(int action, int code, double now);
 static int platform_key_state(int code);
+
+/* ===================================================================
+ * 4. TAMPON D'IMAGE : un pixel = une couleur
+ * =================================================================== */
+
+/* L'image est un tableau de screen_w * screen_h couleurs, rangées ligne
+ * par ligne : le pixel (x, y) est pixels[y * screen_w + x].
+ * Chaque caractère du terminal affiche deux pixels l'un au-dessus de
+ * l'autre, d'où une hauteur égale à deux fois le nombre de lignes. */
+static struct Color *pixels = NULL;
+static int screen_w = 0, screen_h = 0;
+
+/* (Ré)alloue l'image si la taille du terminal a changé. */
+static void resize_screen(int cols, int rows)
+{
+    if (cols < 1)
+        cols = 1;
+    if (rows < 1)
+        rows = 1;
+    if (cols == screen_w && rows * 2 == screen_h)
+        return;
+    free(pixels); /* free(NULL) ne fait rien : sûr au premier appel */
+    pixels = malloc(sizeof *pixels * (size_t)cols * (size_t)rows * 2);
+    if (!pixels) {
+        fputs("Plus de mémoire.\n", stderr);
+        exit(1);
+    }
+    screen_w = cols;
+    screen_h = rows * 2;
+}
 
 /* ===================================================================
  * 5. AFFICHAGE : un tampon de texte envoyé en une seule écriture
@@ -111,6 +147,74 @@ static void out_printf(const char *fmt, ...)
         va_end(args);
     }
     out_len += (size_t)n;
+}
+
+/* Ajoute un nombre de 0 à 255, sans passer par printf (bien plus rapide). */
+static void out_byte_number(unsigned char n)
+{
+    if (n >= 100)
+        out_data[out_len++] = (char)('0' + n / 100);
+    if (n >= 10)
+        out_data[out_len++] = (char)('0' + n / 10 % 10);
+    out_data[out_len++] = (char)('0' + n % 10);
+}
+
+/* Ajoute la séquence qui change la couleur du texte (38) ou du fond (48). */
+static void out_color(int layer, struct Color c)
+{
+    out_reserve(32);
+    out_data[out_len++] = '\x1b';
+    out_data[out_len++] = '[';
+    out_data[out_len++] = layer == 38 ? '3' : '4';
+    out_data[out_len++] = '8';
+    out_data[out_len++] = ';';
+    out_data[out_len++] = '2';
+    out_data[out_len++] = ';';
+    out_byte_number(c.r);
+    out_data[out_len++] = ';';
+    out_byte_number(c.g);
+    out_data[out_len++] = ';';
+    out_byte_number(c.b);
+    out_data[out_len++] = 'm';
+}
+
+static bool same_color(struct Color a, struct Color b)
+{
+    return a.r == b.r && a.g == b.g && a.b == b.b;
+}
+
+/* Convertit l'image en texte. Chaque caractère est un demi-bloc ▀ : sa
+ * couleur de texte peint le pixel du haut, sa couleur de fond celui du bas.
+ * On ne réécrit une couleur que si elle change : souvent, deux caractères
+ * voisins ont les mêmes, et le terminal reçoit alors bien moins d'octets. */
+static void draw_pixels(void)
+{
+    struct Color fg = {0, 0, 0}, bg = {0, 0, 0};
+    bool first = true;
+    /* Début d'image « synchronisée » : le terminal attend la fin avant
+     * d'afficher, l'image n'apparaît jamais à moitié dessinée. Les
+     * terminaux qui ne connaissent pas cette séquence l'ignorent. */
+    out_printf("\x1b[?2026h");
+    for (int y = 0; y < screen_h; y += 2) {
+        /* curseur au début de la ligne y/2 + 1 (le terminal compte à partir de 1) */
+        out_printf("\x1b[%d;1H", y / 2 + 1);
+        for (int x = 0; x < screen_w; x++) {
+            struct Color top = pixels[y * screen_w + x];
+            struct Color bottom = pixels[(y + 1) * screen_w + x];
+            if (first || !same_color(top, fg))
+                out_color(38, top);
+            if (first || !same_color(bottom, bg))
+                out_color(48, bottom);
+            fg = top;
+            bg = bottom;
+            first = false;
+            out_reserve(3);
+            out_data[out_len++] = '\xe2'; /* ▀ s'écrit en 3 octets en UTF-8 */
+            out_data[out_len++] = '\x96';
+            out_data[out_len++] = '\x80';
+        }
+    }
+    out_printf("\x1b[0m");
 }
 
 static void out_flush(void)
@@ -407,10 +511,6 @@ static void restore_terminal(void)
 
 int main(void)
 {
-    static const char *const action_names[ACT_COUNT] = {
-        "avancer", "reculer", "pas a gauche", "pas a droite", "tourner a gauche", "tourner a droite",
-    };
-
     platform_init();
     atexit(restore_terminal);
     /* écran alternatif (le terminal retrouve son contenu en quittant), curseur caché */
@@ -420,36 +520,39 @@ int main(void)
     double next_frame = previous; /* heure prévue de la prochaine image */
     double fps_timer = previous, fps = 0.0;
     int frames = 0;
-    double bar = 0.0; /* avance tant que « avancer » est tenu : teste la fluidité */
+    double t = 0.0; /* temps de l'animation, en secondes */
 
     while (!quit_requested) {
         double now = platform_now();
         double dt = now - previous; /* temps écoulé depuis l'image précédente */
         previous = now;
+        t += dt;
 
         platform_poll_input(now);
         update_held_actions(now);
-        if (action_held[ACT_FORWARD])
-            bar += dt * 20.0;
-        if (bar >= 60.0)
-            bar -= 60.0;
 
         int cols, rows;
         platform_terminal_size(&cols, &rows);
+        if (cols != screen_w || rows * 2 != screen_h)
+            out_printf("\x1b[2J"); /* taille changée : on efface tout */
+        resize_screen(cols, rows);
 
-        /* \x1b[H = curseur en haut à gauche ; \x1b[K = efface la fin de la ligne */
-        out_printf("\x1b[H\x1b[38;2;0;255;255m  NEON MAZE - test du clavier\x1b[0m\x1b[K\r\n\x1b[K\r\n");
-        out_printf("  Terminal : %d x %d   images/s : %.0f\x1b[K\r\n\x1b[K\r\n", cols, rows, fps);
-        for (int a = 0; a < ACT_COUNT; a++) {
-            if (action_held[a])
-                out_printf("  \x1b[38;2;255;0;200m%-18s TENU\x1b[0m\x1b[K\r\n", action_names[a]);
-            else
-                out_printf("  %-18s -\x1b[K\r\n", action_names[a]);
+        /* Test de charge : un « plasma » où chaque pixel change à chaque
+         * image, le pire cas pour le terminal. */
+        for (int y = 0; y < screen_h; y++) {
+            for (int x = 0; x < screen_w; x++) {
+                struct Color *p = &pixels[y * screen_w + x];
+                p->r = (unsigned char)(127.5 + 127.5 * sin(x * 0.10 + t));
+                p->g = (unsigned char)(127.5 + 127.5 * sin(y * 0.15 - t * 1.3));
+                p->b = (unsigned char)(127.5 + 127.5 * sin((x + y) * 0.07 + t * 0.7));
+            }
         }
-        out_printf("\x1b[K\r\n  Tiens Z : la barre doit avancer sans a-coups.\x1b[K\r\n  [");
-        for (int i = 0; i < 60; i++)
-            out_printf(i == (int)bar ? "\x1b[38;2;180;255;0m#\x1b[0m" : ".");
-        out_printf("]\x1b[K\r\n\x1b[K\r\n  Echap ou Ctrl+C pour quitter.\x1b[K\x1b[J");
+        draw_pixels();
+        size_t frame_bytes = out_len;
+        out_printf("\x1b[H\x1b[48;2;0;0;0m\x1b[38;2;0;255;255m NEON MAZE - test de charge | %dx%d pixels | "
+                   "%.0f images/s | %u Ko par image | Echap pour quitter \x1b[0m",
+                   screen_w, screen_h, fps, (unsigned)(frame_bytes / 1024));
+        out_printf("\x1b[?2026l"); /* fin de l'image synchronisée : le terminal peut afficher */
         out_flush();
 
         frames++;
@@ -469,6 +572,7 @@ int main(void)
             next_frame = platform_now();
     }
 
+    free(pixels);
     free(out_data);
     return 0; /* restore_terminal() est appelée ici, grâce à atexit() */
 }

@@ -13,7 +13,7 @@
 
 ## Phase 1 - Premier rendu 3D
 - [ ] Terminal : mode brut, curseur caché, restauration propre en quittant (même Ctrl+C)
-- [ ] Tampon d'image en couleurs, affichage en une écriture par image
+- [x] Tampon d'image en couleurs, affichage en une écriture par image, sortie synchronisée (2026-10-14). Test de charge (plasma, pire cas) : Windows Terminal tient 60 images/s à 120x60 pixels (130 Ko par image) ; le terminal de VS Code saccade → **Windows Terminal = terminal conseillé dans le README**
 - [ ] Raycasting (algorithme DDA) : murs, distance, hauteur des colonnes
 - [ ] Déplacement et rotation au clavier, collisions avec les murs
 
