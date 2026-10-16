@@ -36,8 +36,7 @@
 - [x] GitHub Actions : compilation à 0 avertissement (`-Werror`) sur Windows, Linux et macOS + clang, et lancement du jeu dans un faux terminal sous Linux (Échap → sortie propre), vert le 2026-10-16
 - [x] Badge de la compilation dans le README
 - [x] README : GIF (fabriqué hors git par `build/gif.c` + `build/make_gif.py` : course sur le plus court chemin), une commande pour compiler, explication illustrée du raycasting, licence MIT (2026-10-16)
-- [ ] Image d'aperçu pour les partages : `D:\_journal
-eon-mazepercu-social-1280x640.png`, à envoyer par Leture dans Settings → Social preview
+- [ ] Image d'aperçu pour les partages : `D:/_journal/neon-maze/apercu-social-1280x640.png`, à envoyer par Leture dans Settings → Social preview
 - [x] Revue à froid (2026-10-16) : aucun bug mémoire ; 9 corrections (PR #4). Restent pour le README : sous Linux/macOS, deux touches tenues à la fois ne marchent pas bien (le terminal ne répète que la dernière) ; ▀ peut s'afficher sur deux cases dans un terminal réglé en chinois, japonais ou coréen
 - [ ] Repo GitHub public + description + sujets (Leture), ligne sur le profil GitHub
 - [ ] Succès GitHub « Quickdraw » : une fois le repo public, ouvrir une issue pour un vrai petit défaut et la fermer en moins de 5 min avec sa correction
