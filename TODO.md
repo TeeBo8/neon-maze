@@ -29,7 +29,7 @@
 - [x] Minimap avec brouillard de guerre (seules les cases vues apparaissent)
 - [x] Écran titre (caméra qui tourne, lettres néon) et écran de fin (temps, record, rejouer)
 - [x] Taille réglable : `./neon-maze 20` (de 4 à 30)
-- [ ] Test de Leture dans Windows Terminal (une partie complète)
+- [x] Test de Leture dans Windows Terminal : partie complète validée le 2026-10-16
 - [ ] Le fichier fait ~1 420 lignes : en rediscuter avant de dépasser 1 500 (règle du CLAUDE.md)
 
 ## Phase 4 - Publication
