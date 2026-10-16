@@ -33,9 +33,10 @@
 - [ ] Le fichier fait ~1 420 lignes : en rediscuter avant de dépasser 1 500 (règle du CLAUDE.md)
 
 ## Phase 4 - Publication
-- [ ] GitHub Actions : compilation à 0 avertissement sur Windows, Linux et macOS à chaque PR (seule façon de vérifier la partie Linux/macOS, pas de Linux sur le PC de Leture) + badge dans le README
+- [x] GitHub Actions : compilation à 0 avertissement (`-Werror`) sur Windows, Linux et macOS + clang, et lancement du jeu dans un faux terminal sous Linux (Échap → sortie propre), vert le 2026-10-16
+- [ ] Badge de la compilation dans le README
 - [ ] README : GIF, une commande pour compiler, explication illustrée du raycasting
-- [ ] Revue à froid
+- [x] Revue à froid (2026-10-16) : aucun bug mémoire ; 9 corrections (PR #4). Restent pour le README : sous Linux/macOS, deux touches tenues à la fois ne marchent pas bien (le terminal ne répète que la dernière) ; ▀ peut s'afficher sur deux cases dans un terminal réglé en chinois, japonais ou coréen
 - [ ] Repo GitHub public + description + sujets (Leture), ligne sur le profil GitHub
 - [ ] Succès GitHub « Quickdraw » : une fois le repo public, ouvrir une issue pour un vrai petit défaut et la fermer en moins de 5 min avec sa correction
 - [ ] Activer les Discussions (succès « Galaxy Brain » : répondre aux questions des visiteurs)
