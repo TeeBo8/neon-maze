@@ -6,8 +6,9 @@
  * Jouer    : ./neon-maze
  */
 
-/* Avec -std=c99, Linux et macOS masquent les fonctions POSIX (termios,
- * clock_gettime, nanosleep). Ces deux lignes les rendent visibles.
+/* Avec -std=c99, Linux et macOS masquent une partie des fonctions POSIX
+ * (clock_gettime, nanosleep, la taille du terminal sur macOS). Ces deux
+ * lignes les rendent visibles.
  * Elles doivent venir AVANT tout #include. */
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
@@ -143,6 +144,7 @@ static volatile sig_atomic_t quit_requested = 0;
  * l'une l'autre, le compilateur doit connaître ces fonctions à l'avance. */
 static void key_press(int action, int code, double now);
 static int platform_key_state(int code);
+static void die(const char *message);
 
 /* ===================================================================
  * 3. CARTE
@@ -249,12 +251,16 @@ static void place_exit(void)
     static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
 
     memset(visited, 0, sizeof visited);
-    int head = 0, tail = 0, last = 1 * map_w + 1;
-    queue[tail++] = last; /* une case (x, y) est rangée comme le nombre y * map_w + x */
+    int head = 0, tail = 0, farthest = 1 * map_w + 1;
+    queue[tail++] = farthest; /* une case (x, y) est rangée comme le nombre y * map_w + x */
     visited[1][1] = true;
     while (head < tail) {
-        last = queue[head++];
-        int x = last % map_w, y = last / map_w;
+        int cell = queue[head++];
+        int x = cell % map_w, y = cell / map_w;
+        /* Seulement une case de couloir (deux coordonnées impaires), pas un
+         * passage entre deux : la sortie est ainsi au bout d'un couloir. */
+        if (x % 2 == 1 && y % 2 == 1)
+            farthest = cell;
         for (int d = 0; d < 4; d++) {
             int nx = x + dx[d], ny = y + dy[d];
             if (map[ny][nx] == ' ' && !visited[ny][nx]) {
@@ -263,7 +269,7 @@ static void place_exit(void)
             }
         }
     }
-    map[last / map_w][last % map_w] = 'X';
+    map[farthest / map_w][farthest % map_w] = 'X';
 }
 
 /* Les murs changent de couleur par grandes zones, pour se repérer. */
@@ -303,10 +309,8 @@ static struct Light *light = NULL, *light_tmp = NULL;
 static void *alloc_or_die(size_t bytes)
 {
     void *p = malloc(bytes);
-    if (!p) {
-        fputs("Plus de mémoire.\n", stderr);
-        exit(1);
-    }
+    if (!p)
+        die("Plus de mémoire.");
     return p;
 }
 
@@ -349,10 +353,8 @@ static void out_reserve(size_t extra)
     while (cap < out_len + extra)
         cap *= 2;
     char *bigger = realloc(out_data, cap);
-    if (!bigger) {
-        fputs("Plus de mémoire.\n", stderr);
-        exit(1);
-    }
+    if (!bigger)
+        die("Plus de mémoire.");
     out_data = bigger;
     out_cap = cap;
 }
@@ -421,10 +423,6 @@ static void draw_pixels(void)
 {
     struct Color fg = {0, 0, 0}, bg = {0, 0, 0};
     bool first = true;
-    /* Début d'image « synchronisée » : le terminal attend la fin avant
-     * d'afficher, l'image n'apparaît jamais à moitié dessinée. Les
-     * terminaux qui ne connaissent pas cette séquence l'ignorent. */
-    out_printf("\x1b[?2026h");
     for (int y = 0; y < screen_h; y += 2) {
         /* curseur au début de la ligne y/2 + 1 (le terminal compte à partir de 1) */
         out_printf("\x1b[%d;1H", y / 2 + 1);
@@ -742,7 +740,7 @@ static void minimap_plot(int left, int top, int scale, double x, double y, struc
 static void draw_minimap(const struct Player *p, double clock)
 {
     int scale = 2;
-    while (scale > 0 && (map_w * scale > screen_w / 4 || map_h * scale > screen_h / 2))
+    while (scale > 0 && (map_w * scale > screen_w / 3 || map_h * scale > screen_h / 2))
         scale--;
     if (scale == 0)
         return;
@@ -859,8 +857,10 @@ static void dim_scene(double amount)
 /* Un temps en secondes, écrit « 01:23.4 ». */
 static void format_time(char *buf, size_t size, double seconds)
 {
-    int minutes = (int)(seconds / 60);
-    snprintf(buf, size, "%02d:%04.1f", minutes, seconds - minutes * 60);
+    /* On arrondit d'abord au dixième, une seule fois : arrondir les secondes
+     * après avoir calculé les minutes pourrait afficher « 00:60.0 ». */
+    long tenths = (long)(seconds * 10 + 0.5);
+    snprintf(buf, size, "%02ld:%02ld.%ld", tenths / 600, tenths / 10 % 60, tenths % 10);
 }
 
 /* Dessine une image complète de la scène dans « pixels ». */
@@ -923,14 +923,14 @@ static void platform_init(void)
 {
     con_in = GetStdHandle(STD_INPUT_HANDLE);
     con_out = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (!GetConsoleMode(con_in, &saved_in_mode) || !GetConsoleMode(con_out, &saved_out_mode)) {
-        fputs("Neon Maze doit être lancé dans un terminal.\n", stderr);
-        exit(1);
-    }
+    if (!GetConsoleMode(con_in, &saved_in_mode) || !GetConsoleMode(con_out, &saved_out_mode))
+        die("Neon Maze doit être lancé dans un terminal.");
+    /* Sans les séquences de couleur, l'écran se remplirait de codes illisibles
+     * (vieille console de Windows). */
+    if (!SetConsoleMode(con_out, saved_out_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        die("Ce terminal n'affiche pas les couleurs : lance Neon Maze dans Windows Terminal.");
     saved_codepage = GetConsoleOutputCP();
-
     SetConsoleOutputCP(CP_UTF8); /* pour le caractère ▀ */
-    SetConsoleMode(con_out, saved_out_mode | ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
     /* Clavier brut : pas d'écho, pas d'attente de la touche Entrée, Ctrl+C
      * arrive comme une touche normale, pas de sélection à la souris. */
     SetConsoleMode(con_in, ENABLE_EXTENDED_FLAGS);
@@ -1034,10 +1034,8 @@ static void on_signal(int sig)
 
 static void platform_init(void)
 {
-    if (tcgetattr(STDIN_FILENO, &saved_termios) != 0) {
-        fputs("Neon Maze doit être lancé dans un terminal.\n", stderr);
-        exit(1);
-    }
+    if (tcgetattr(STDIN_FILENO, &saved_termios) != 0)
+        die("Neon Maze doit être lancé dans un terminal.");
     /* Clavier brut : pas d'écho, pas d'attente de la touche Entrée, Ctrl+C
      * arrive comme une touche normale, et read() ne bloque jamais. */
     struct termios raw = saved_termios;
@@ -1107,23 +1105,51 @@ static int action_from_arrow(int c)
     }
 }
 
+/* Octets reçus mais pas encore traités : une flèche peut arriver en
+ * plusieurs morceaux, on garde le début en attendant la suite. */
+static unsigned char input[256];
+static size_t input_len = 0;
+
 static void platform_poll_input(double now)
 {
-    unsigned char buf[64];
+    bool received = false;
     ssize_t n;
-    while ((n = read(STDIN_FILENO, buf, sizeof buf)) > 0) {
-        for (ssize_t i = 0; i < n; i++) {
-            int c = buf[i];
-            if (c == 27 && i + 2 < n && (buf[i + 1] == '[' || buf[i + 1] == 'O')) {
-                key_press(action_from_arrow(buf[i + 2]), 1000 + buf[i + 2], now);
-                i += 2;
-            } else if (c == 27 || c == 3) { /* Échap seul ou Ctrl+C */
-                quit_requested = 1;
-            } else {
-                key_press(action_from_key(tolower(c)), tolower(c), now);
+    while (input_len < sizeof input && (n = read(STDIN_FILENO, input + input_len, sizeof input - input_len)) > 0) {
+        input_len += (size_t)n;
+        received = true;
+    }
+
+    size_t i = 0;
+    while (i < input_len) {
+        int c = input[i];
+        if (c == 27) {
+            bool arrow_start = i + 1 < input_len && (input[i + 1] == '[' || input[i + 1] == 'O');
+            if (i + 1 == input_len || (arrow_start && i + 2 == input_len)) {
+                /* Peut-être le début d'une flèche : on attend l'image suivante.
+                 * Si rien de plus n'est arrivé d'ici là, c'était Échap seul. */
+                if (received)
+                    break;
+                if (i + 1 == input_len)
+                    quit_requested = 1;
+                i = input_len;
+                break;
             }
+            if (arrow_start) {
+                key_press(action_from_arrow(input[i + 2]), 1000 + input[i + 2], now);
+                i += 3;
+            } else {
+                i += 2; /* Échap suivi d'une touche : c'est Alt + touche, ignorée */
+            }
+        } else {
+            if (c == 3) /* Ctrl+C */
+                quit_requested = 1;
+            else
+                key_press(action_from_key(tolower(c)), tolower(c), now);
+            i++;
         }
     }
+    memmove(input, input + i, input_len - i);
+    input_len -= i;
 }
 
 /* Un terminal Linux ou macOS ne dit pas si une touche est enfoncée. */
@@ -1173,13 +1199,29 @@ static void update_held_actions(double now)
  * 9. RESTAURATION DU TERMINAL
  * =================================================================== */
 
-/* Enregistrée avec atexit() : appelée automatiquement à la sortie du programme. */
+/* Vrai tant que le terminal est en mode jeu (clavier brut, écran alternatif). */
+static bool terminal_in_game_mode = false;
+
+/* Enregistrée avec atexit() : appelée automatiquement à la sortie du
+ * programme. Elle ne fait rien si le terminal est déjà restauré. */
 static void restore_terminal(void)
 {
+    if (!terminal_in_game_mode)
+        return;
+    terminal_in_game_mode = false;
     /* couleurs par défaut, curseur visible, retour à l'écran normal */
     fputs("\x1b[0m\x1b[?25h\x1b[?1049l", stdout);
     fflush(stdout);
     platform_restore();
+}
+
+/* Quitte sur une erreur. Le terminal est restauré AVANT d'écrire le
+ * message : sinon la sortie de l'écran alternatif l'effacerait aussitôt. */
+static void die(const char *message)
+{
+    restore_terminal();
+    fprintf(stderr, "%s\n", message);
+    exit(1);
 }
 
 /* ===================================================================
@@ -1187,8 +1229,8 @@ static void restore_terminal(void)
  * =================================================================== */
 
 /* Ce que toucherait le joueur centré en (x, y). On teste les quatre coins
- * du petit carré qui l'entoure (i va de 0 à 3 : son bit 1 choisit la
- * gauche ou la droite, son bit 2 le haut ou le bas). Renvoie ' ' si rien
+ * du petit carré qui l'entoure (i va de 0 à 3 : « i & 1 » choisit la
+ * gauche ou la droite, « i & 2 » le haut ou le bas). Renvoie ' ' si rien
  * n'est touché ; la sortie passe en priorité, pour ne pas la rater dans un coin. */
 static char touched_cell(double x, double y)
 {
@@ -1327,17 +1369,21 @@ int main(int argc, char **argv)
 {
     struct Game game = {.screen = SCREEN_TITLE, .maze_size = MAZE_SIZE};
     if (argc > 1) {
-        game.maze_size = atoi(argv[1]); /* atoi rend 0 si ce n'est pas un nombre */
-        if (argc > 2 || game.maze_size < MAZE_MIN || game.maze_size > MAZE_MAX) {
+        /* strtol lit un nombre et dit où il s'arrête : « 12abc » est refusé. */
+        char *end;
+        long size = strtol(argv[1], &end, 10);
+        if (argc > 2 || *end != '\0' || size < MAZE_MIN || size > MAZE_MAX) {
             fprintf(stderr, "Usage : %s [taille du labyrinthe, de %d à %d]\n", argv[0], MAZE_MIN, MAZE_MAX);
             return 1;
         }
+        game.maze_size = (int)size;
     }
     srand((unsigned)time(NULL)); /* l'heure comme graine : un labyrinthe différent à chaque lancement */
     generate_maze(game.maze_size);
     reset_player(&game.player);
 
     platform_init();
+    terminal_in_game_mode = true;
     atexit(restore_terminal);
     /* écran alternatif (le terminal retrouve son contenu en quittant), curseur caché */
     fputs("\x1b[?1049h\x1b[?25l\x1b[2J", stdout);
@@ -1383,6 +1429,11 @@ int main(int argc, char **argv)
             break;
         }
 
+        /* Début d'image « synchronisée » : le terminal attend la fin avant
+         * d'afficher, l'image n'apparaît jamais à moitié dessinée (ni
+         * l'écran à moitié effacé). Les terminaux qui ne connaissent pas
+         * cette séquence l'ignorent. */
+        out_printf("\x1b[?2026h");
         int cols, rows;
         platform_terminal_size(&cols, &rows);
         if (cols != screen_w || rows * 2 != screen_h)
