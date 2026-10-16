@@ -22,7 +22,7 @@ Un labyrinthe en 3D en vue subjective (façon Wolfenstein 3D), **affiché dans l
   - `sh build/shots.sh` : compile le jeu et `build/snapshot.c`, puis enregistre des vues en PNG avec le temps de rendu et le poids de chaque image. Ça permet de vérifier le rendu sans lancer le jeu.
   - `build/gif.c` + `python build/make_gif.py` : refont `docs/apercu.gif` (course sur le plus court chemin).
   - Windows (Smart App Control) bloque parfois un exécutable déjà vu dont le contenu a changé : compiler les outils sous un nom neuf à chaque fois.
-- Le fichier fait ~1 450 lignes : en rediscuter avec Leture avant de dépasser 1 500.
+- Le fichier fait 1 495 lignes (2026-10-16), soit la limite des ~1 500 : toute nouvelle fonction se discute avec Leture (alléger ou assumer un peu plus).
 
 ## Stack
 

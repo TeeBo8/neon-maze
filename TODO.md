@@ -30,7 +30,7 @@
 - [x] Écran titre (caméra qui tourne, lettres néon) et écran de fin (temps, record, rejouer)
 - [x] Taille réglable : `./neon-maze 20` (de 4 à 30)
 - [x] Test de Leture dans Windows Terminal : partie complète validée le 2026-10-16
-- [ ] Le fichier fait ~1 420 lignes : en rediscuter avant de dépasser 1 500 (règle du CLAUDE.md)
+- [ ] Le fichier fait 1 495 lignes : à la limite des ~1 500, à rediscuter avant toute nouvelle fonction
 
 ## Phase 4 - Publication
 - [x] GitHub Actions : compilation à 0 avertissement (`-Werror`) sur Windows, Linux et macOS + clang, et lancement du jeu dans un faux terminal sous Linux (Échap → sortie propre), vert le 2026-10-16
