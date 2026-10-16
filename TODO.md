@@ -18,9 +18,11 @@
 - [x] Déplacement et rotation au clavier, collisions avec les murs (2026-10-16)
 
 ## Phase 2 - Néon
-- [ ] Murs lumineux, brouillard coloré selon la distance, sol et plafond en dégradé
-- [ ] Minimap, compteur d'images par seconde
-- [ ] Adaptation à la taille du terminal
+- [x] Murs néon (faces sombres, tubes lumineux aux arêtes, cœur blanc), halo (bloom), brouillard, sol et plafond en grille (2026-10-16)
+- [x] Minimap, compteur d'images par seconde (2026-10-16)
+- [x] Adaptation à la taille du terminal : perspective calée sur la largeur, minimap masquée si elle ne tient pas (2026-10-16)
+- [x] Poids des images : tolérance de couleur (47 Ko au lieu de 80 à 120x30)
+- [ ] Test de Leture dans Windows Terminal (rendu, fluidité en plein écran)
 
 ## Phase 3 - Le jeu
 - [ ] Objectif (trouver la sortie, chrono) et/ou labyrinthe généré au hasard

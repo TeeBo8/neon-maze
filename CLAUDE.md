@@ -12,12 +12,12 @@ Un labyrinthe en 3D en vue subjective (façon Wolfenstein 3D), **affiché dans l
 - **Les ingrédients des repos qui récoltent des étoiles** : un GIF qui montre l'effet en 5 secondes, une seule commande pour compiler, un code court et lisible, un README qui explique les maths (raycasting) avec des schémas.
 - **Nom** : « neon-maze » est provisoire. Pour renommer : le dossier, le fichier source, la commande de compilation dans ce fichier et le README.
 
-## État au 2026-10-14
+## État au 2026-10-16
 
-- Dossier initialisé : git (branche `main`, aucun commit), `.gitignore`, `.gitattributes`, README provisoire. Pas encore de repo GitHub.
-- Compilateur : **GCC 15.2** installé via Scoop (`scoop install gcc`, distribution MinGW nuwen). Un test a confirmé que la compilation en `-std=c99 -Wall -Wextra -Wpedantic` passe sans avertissement avec les séquences de couleurs 24 bits et l'API console Windows.
-- **Pas encore vérifié** : le rendu réel dans la fenêtre de terminal de Leture (Windows Terminal ou le terminal de VS Code). C'est le premier test de la prochaine session.
-- Le code n'est pas commencé : proposer l'organisation (plan mode) avant d'écrire.
+- Repo **privé** TeeBo8/neon-maze créé le 2026-10-16 (le passage en public reste la décision de Leture).
+- Phase 1 (terminal, clavier, raycasting, déplacements) testée par Leture, PR #1. Phase 2 (néon, halo, grille, minimap) sur `feat/neon`.
+- **Terminal conseillé : Windows Terminal.** Celui de VS Code saccade dès que l'image est lourde.
+- **Outil de capture, hors git** : `sh build/shots.sh` compile le jeu et `build/snapshot.c`, puis enregistre quelques vues en PNG dans `build/`, avec le temps de rendu et le poids de chaque image. Ça permet de vérifier le rendu sans lancer le jeu. Windows (Smart App Control) bloque parfois un exécutable déjà vu dont le contenu a changé : le script donne donc un nom neuf à l'outil à chaque fois.
 
 ## Stack
 
