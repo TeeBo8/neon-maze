@@ -1,0 +1,35 @@
+# Compile Neon Maze sur Windows, Linux et macOS à chaque push et chaque PR.
+# Le moindre avertissement fait échouer la compilation (-Werror).
+name: Compilation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  compilation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compiler avec gcc (0 avertissement)
+        shell: bash
+        run: gcc -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -o neon-maze neon-maze.c -lm
+
+      - name: Compiler avec clang (0 avertissement)
+        if: runner.os == 'Linux'
+        run: clang -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror -o neon-maze-clang neon-maze.c -lm
+
+      # Lance le jeu dans un faux terminal, appuie sur Échap au bout de
+      # 2 secondes, et vérifie qu'il quitte de lui-même, sans erreur.
+      - name: Lancer puis quitter avec Échap
+        if: runner.os == 'Linux'
+        run: |
+          (sleep 2; printf '\033'; sleep 5) | timeout 15 script -qec "./neon-maze" /dev/null > sortie.txt
+          echo "Le jeu a quitté proprement."
+          grep -q $'\x1b\\[?1049l' sortie.txt && echo "Terminal restauré (sortie de l'écran alternatif)."
