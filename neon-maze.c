@@ -22,13 +22,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <sys/ioctl.h>
 #include <termios.h>
-#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -44,6 +44,13 @@
 #define FOV_PLANE 0.66     /* largeur du plan caméra : 0.66 donne ~66° de champ de vision */
 #define PLAYER_RADIUS 0.2  /* le joueur est un petit carré, pour ne pas frôler les murs */
 #define FOG_DISTANCE 10.0  /* à cette distance (en cases), un mur a disparu dans le brouillard */
+
+/* Labyrinthe */
+#define MAZE_SIZE 10       /* taille par défaut, en couloirs par côté (changeable : ./neon-maze 20) */
+#define MAZE_MIN 4
+#define MAZE_MAX 30
+#define MAZE_LOOPS 0.12    /* part de murs intérieurs ouverts en plus : des boucles, moins de culs-de-sac */
+#define COLOR_ZONE 8       /* les murs changent de couleur toutes les COLOR_ZONE cases */
 
 /* Néon */
 #define LINE_WIDTH 1.3      /* épaisseur des tubes de néon, en pixels */
@@ -71,7 +78,8 @@ enum Action {
     ACT_STRAFE_RIGHT,
     ACT_TURN_LEFT,
     ACT_TURN_RIGHT,
-    ACT_COUNT, /* nombre d'actions : toujours en dernier */
+    ACT_CONFIRM, /* Entrée ou Espace : commencer, rejouer */
+    ACT_COUNT,   /* nombre d'actions : toujours en dernier */
     ACT_NONE = -1
 };
 
@@ -89,6 +97,24 @@ struct Player {
     double plane_x, plane_y;
 };
 
+/* Les trois écrans du jeu. */
+enum Screen {
+    SCREEN_TITLE,
+    SCREEN_PLAY,
+    SCREEN_WON
+};
+
+/* L'état de la partie. */
+struct Game {
+    enum Screen screen;
+    struct Player player;
+    int maze_size;      /* couloirs par côté */
+    double clock;       /* heure actuelle, pour les animations */
+    double start_time;  /* début de la partie en cours */
+    double elapsed;     /* temps de la dernière partie gagnée, en secondes */
+    double best;        /* meilleur temps depuis le lancement (0 = aucun) */
+};
+
 /* Une lumière : comme une couleur, mais en nombres à virgule, pour pouvoir
  * additionner plusieurs lueurs sans être bloqué à 255. */
 struct Light {
@@ -104,6 +130,7 @@ static const struct Color CEILING_GRID_COLOR = {120, 60, 255};
 static const struct Color WALL_CYAN = {0, 255, 255};
 static const struct Color WALL_MAGENTA = {255, 0, 200};
 static const struct Color WALL_LIME = {180, 255, 0};
+static const struct Color EXIT_COLOR = {255, 190, 30}; /* la sortie, dorée */
 static const struct Color WHITE = {255, 255, 255};
 static const struct Color MINIMAP_PLAYER = {255, 255, 255};
 static const struct Color MINIMAP_VIEW = {255, 220, 0};
@@ -122,36 +149,26 @@ static int platform_key_state(int code);
  * =================================================================== */
 
 /* Vue de dessus : une case = un caractère. Espace = vide ; '#', 'M' et 'L'
- * = murs cyan, magenta et vert. Toutes les lignes ont la même longueur,
- * et le bord doit être fermé. Le joueur part de la case (1, 1), regard vers
- * la droite. */
-static const char *const map[] = {
-    "################",
-    "#     #        #",
-    "#     #  MMMM  #",
-    "#  L  #     M  #",
-    "#     ####  M  #",
-    "#           M  #",
-    "#  ######      #",
-    "#  #    #  LL  #",
-    "#  #    #  LL  #",
-    "#  #           #",
-    "#     MMMM###  #",
-    "#            # #",
-    "#  LLLLL     # #",
-    "#      L       #",
-    "#      L       #",
-    "################",
-};
-#define MAP_H ((int)(sizeof map / sizeof map[0]))
-#define MAP_W ((int)strlen(map[0]))
+ * = murs cyan, magenta et vert ; 'X' = la sortie. Un labyrinthe de n
+ * couloirs par côté occupe 2n + 1 cases : les couloirs sont sur les
+ * cases impaires, les murs possibles entre eux sur les cases paires. */
+#define MAP_MAX (2 * MAZE_MAX + 1)
+static char map[MAP_MAX][MAP_MAX];
+static bool seen[MAP_MAX][MAP_MAX]; /* cases déjà vues par le joueur, pour la minimap */
+static int map_w = 0, map_h = 0;
 
 /* Contenu de la case (x, y) ; hors de la carte, c'est un mur. */
 static char map_at(int x, int y)
 {
-    if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H)
+    if (x < 0 || y < 0 || x >= map_w || y >= map_h)
         return '#';
     return map[y][x];
+}
+
+static void mark_seen(int x, int y)
+{
+    if (x >= 0 && y >= 0 && x < map_w && y < map_h)
+        seen[y][x] = true;
 }
 
 static struct Color wall_color(char cell)
@@ -159,8 +176,111 @@ static struct Color wall_color(char cell)
     switch (cell) {
     case 'M': return WALL_MAGENTA;
     case 'L': return WALL_LIME;
+    case 'X': return EXIT_COLOR;
     default:  return WALL_CYAN;
     }
+}
+
+/* Nombre entier au hasard, de 0 à n - 1. */
+static int random_below(int n)
+{
+    return rand() % n;
+}
+
+/* Creuse un labyrinthe de n couloirs par côté, avec l'algorithme du
+ * « backtracker » : on part d'une case, on creuse vers une voisine pas
+ * encore visitée tirée au hasard, et ainsi de suite. Coincé dans un
+ * cul-de-sac, on revient sur ses pas (la pile garde le chemin parcouru)
+ * jusqu'à une case qui a encore une voisine libre. Quand la pile est vide,
+ * chaque case a été visitée : tout le labyrinthe est relié. */
+static void carve_maze(int n)
+{
+    static int stack_x[MAZE_MAX * MAZE_MAX], stack_y[MAZE_MAX * MAZE_MAX];
+    static const int dx[4] = {2, -2, 0, 0}, dy[4] = {0, 0, 2, -2};
+
+    map_w = map_h = 2 * n + 1;
+    memset(map, '#', sizeof map);
+    memset(seen, 0, sizeof seen);
+
+    int top = 0;
+    map[1][1] = ' ';
+    stack_x[top] = 1;
+    stack_y[top] = 1;
+    top++;
+    while (top > 0) {
+        int x = stack_x[top - 1], y = stack_y[top - 1];
+        /* les voisines à deux cases (la case entre les deux est le mur) */
+        int free_dirs[4], count = 0;
+        for (int d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d];
+            if (nx > 0 && ny > 0 && nx < map_w - 1 && ny < map_h - 1 && map[ny][nx] == '#')
+                free_dirs[count++] = d;
+        }
+        if (count == 0) {
+            top--; /* cul-de-sac : on revient en arrière */
+            continue;
+        }
+        int d = free_dirs[random_below(count)];
+        map[y + dy[d] / 2][x + dx[d] / 2] = ' '; /* on abat le mur entre les deux */
+        map[y + dy[d]][x + dx[d]] = ' ';
+        stack_x[top] = x + dx[d];
+        stack_y[top] = y + dy[d];
+        top++;
+    }
+
+    /* Quelques murs intérieurs en moins : plusieurs chemins possibles. */
+    int loops = (int)(n * n * MAZE_LOOPS);
+    for (int i = 0; i < loops; i++) {
+        /* un mur entre deux couloirs : une coordonnée paire, l'autre impaire */
+        int x = 1 + random_below(map_w - 2), y = 1 + random_below(map_h - 2);
+        if ((x + y) % 2 == 1)
+            map[y][x] = ' ';
+    }
+}
+
+/* Place la sortie sur la case la plus éloignée du départ, en nombre de
+ * pas. Pour la trouver : un parcours « en largeur ». On visite d'abord les
+ * cases à 1 pas du départ, puis celles à 2 pas, etc. (une file d'attente
+ * garde l'ordre). La dernière case visitée est la plus lointaine. */
+static void place_exit(void)
+{
+    static int queue[MAP_MAX * MAP_MAX];
+    static bool visited[MAP_MAX][MAP_MAX];
+    static const int dx[4] = {1, -1, 0, 0}, dy[4] = {0, 0, 1, -1};
+
+    memset(visited, 0, sizeof visited);
+    int head = 0, tail = 0, last = 1 * map_w + 1;
+    queue[tail++] = last; /* une case (x, y) est rangée comme le nombre y * map_w + x */
+    visited[1][1] = true;
+    while (head < tail) {
+        last = queue[head++];
+        int x = last % map_w, y = last / map_w;
+        for (int d = 0; d < 4; d++) {
+            int nx = x + dx[d], ny = y + dy[d];
+            if (map[ny][nx] == ' ' && !visited[ny][nx]) {
+                visited[ny][nx] = true;
+                queue[tail++] = ny * map_w + nx;
+            }
+        }
+    }
+    map[last / map_w][last % map_w] = 'X';
+}
+
+/* Les murs changent de couleur par grandes zones, pour se repérer. */
+static void paint_walls(void)
+{
+    static const char colors[3] = {'#', 'M', 'L'};
+    for (int y = 0; y < map_h; y++)
+        for (int x = 0; x < map_w; x++)
+            if (map[y][x] == '#')
+                map[y][x] = colors[(x / COLOR_ZONE + y / COLOR_ZONE) % 3];
+}
+
+static void generate_maze(int n)
+{
+    carve_maze(n);
+    place_exit();
+    paint_walls();
 }
 
 /* ===================================================================
@@ -446,7 +566,7 @@ static void draw_floor_and_ceiling(const struct Player *p)
  * le fait avancer case par case (algorithme DDA) jusqu'à toucher un mur.
  * Plus le mur est loin, plus sa colonne est courte : c'est la perspective.
  * Chaque mur est une face sombre bordée de tubes de néon. */
-static void draw_walls(const struct Player *p)
+static void draw_walls(const struct Player *p, double clock)
 {
     double focal = focal_length();
     double horizon = screen_h / 2.0;
@@ -469,9 +589,11 @@ static void draw_walls(const struct Player *p)
         double side_x = (ray_x < 0 ? p->x - cell_x : cell_x + 1.0 - p->x) * delta_x;
         double side_y = (ray_y < 0 ? p->y - cell_y : cell_y + 1.0 - p->y) * delta_y;
 
-        /* DDA : on saute toujours vers le bord de case le plus proche. */
+        /* DDA : on saute toujours vers le bord de case le plus proche.
+         * Chaque case traversée est visible : on la note pour la minimap. */
         bool hit_y_side = false; /* le mur touché est-il une face nord/sud ? */
         char cell = ' ';
+        mark_seen(cell_x, cell_y);
         while (cell == ' ') {
             if (side_x < side_y) {
                 side_x += delta_x;
@@ -483,6 +605,7 @@ static void draw_walls(const struct Player *p)
                 hit_y_side = true;
             }
             cell = map_at(cell_x, cell_y);
+            mark_seen(cell_x, cell_y);
         }
 
         /* Distance perpendiculaire au plan caméra, et non distance réelle
@@ -517,6 +640,13 @@ static void draw_walls(const struct Player *p)
         struct Color color = wall_color(cell);
         /* Faces nord/sud plus sombres que les faces est/ouest : c'est ce qui donne le relief. */
         struct Color face = mix((struct Color){0, 0, 0}, color, WALL_FACE * (hit_y_side ? 0.55 : 1.0));
+        /* La sortie est un portail : des carrés de lumière qui filent vers
+         * son centre. Vus de loin, ils seraient trop serrés pour l'écran
+         * (ça fourmille) : leur contraste baisse avec la taille des pixels. */
+        bool is_exit = cell == 'X';
+        double ring_contrast = clamp01(1.5 - pixel_size * 15);
+        if (is_exit)
+            fog *= 0.5; /* elle perce le brouillard, pour se voir de loin */
 
         /* Le mur va de top à bottom (en pixels, avec décimales). */
         double half = 0.5 * focal / dist;
@@ -530,12 +660,20 @@ static void draw_walls(const struct Player *p)
                 continue;
             /* Tubes horizontaux : le haut et le bas du mur. */
             double k = fmax(vertical, neon_line(fmin(center - top, bottom - center)));
+            double glow = 0;
+            if (is_exit) {
+                /* ring : 0 au centre de la face, 0.5 sur ses bords */
+                double v = (center - top) / (bottom - top);
+                double ring = fmax(fabs(wall_x - 0.5), fabs(v - 0.5));
+                glow = 0.3 + 0.3 * ring_contrast * sin(ring * 30.0 + clock * 6.0);
+                face = mix((struct Color){0, 0, 0}, color, glow);
+            }
             /* Le cœur d'un tube est presque blanc, sa lueur garde la couleur. */
             struct Color c = mix(add(face, color, k), WHITE, k * 0.45);
             pixels[y * screen_w + x] = mix(c, FOG_COLOR, fog);
             /* Le mur cache le sol derrière lui, et donc aussi sa lueur. */
             light[y * screen_w + x] = (struct Light){0, 0, 0};
-            add_light(x, y, color, k * (1 - fog));
+            add_light(x, y, color, (k + glow * 0.4) * (1 - fog));
         }
     }
 }
@@ -599,25 +737,32 @@ static void minimap_plot(int left, int top, int scale, double x, double y, struc
 }
 
 /* La minimap, en haut à droite : une case = un carré de 1 ou 2 pixels de
- * côté. Elle n'apparaît que si elle tient à l'aise sur l'écran. */
-static void draw_minimap(const struct Player *p)
+ * côté. Elle ne montre que les cases déjà vues (le « brouillard de
+ * guerre »), et n'apparaît que si elle tient à l'aise sur l'écran. */
+static void draw_minimap(const struct Player *p, double clock)
 {
     int scale = 2;
-    while (scale > 0 && (MAP_W * scale > screen_w / 4 || MAP_H * scale > screen_h / 2))
+    while (scale > 0 && (map_w * scale > screen_w / 4 || map_h * scale > screen_h / 2))
         scale--;
     if (scale == 0)
         return;
-    int left = screen_w - MAP_W * scale - 2, top = 2; /* top = 2 : sous le bandeau d'infos */
+    int left = screen_w - map_w * scale - 2, top = 2; /* top = 2 : sous le bandeau d'infos */
+    double pulse = 0.5 + 0.5 * sin(clock * 4.0);
 
-    for (int my = 0; my < MAP_H; my++) {
-        for (int mx = 0; mx < MAP_W; mx++) {
+    for (int my = 0; my < map_h; my++) {
+        for (int mx = 0; mx < map_w; mx++) {
             char cell = map[my][mx];
             for (int sy = 0; sy < scale; sy++) {
                 for (int sx = 0; sx < scale; sx++) {
                     struct Color *px = &pixels[(top + my * scale + sy) * screen_w + left + mx * scale + sx];
-                    /* Case vide : la scène assombrie, comme une vitre fumée. Mur : sa couleur. */
-                    *px = cell == ' ' ? mix(*px, (struct Color){0, 0, 0}, 0.75)
-                                      : mix((struct Color){0, 0, 0}, wall_color(cell), 0.8);
+                    /* Pas encore vue : presque noire. Vide : la scène assombrie,
+                     * comme une vitre fumée. Mur : sa couleur. */
+                    if (!seen[my][mx])
+                        *px = mix(*px, (struct Color){0, 0, 0}, 0.9);
+                    else if (cell == ' ')
+                        *px = mix(*px, (struct Color){0, 0, 0}, 0.7);
+                    else
+                        *px = mix((struct Color){0, 0, 0}, wall_color(cell), cell == 'X' ? 0.5 + 0.5 * pulse : 0.8);
                 }
             }
         }
@@ -629,16 +774,121 @@ static void draw_minimap(const struct Player *p)
     minimap_plot(left, top, scale, p->x, p->y, MINIMAP_PLAYER);
 }
 
+/* Police de 5 x 7 pixels pour les grands titres. Chaque glyphe fait 7
+ * lignes ; dans chaque ligne, les 5 bits de droite disent quels pixels
+ * allumer (0x10 = le plus à gauche, 0x01 = le plus à droite).
+ * Exemple, le A : 01110 / 10001 / 10001 / 11111 / 10001 / 10001 / 10001. */
+struct Glyph {
+    char c;
+    unsigned char rows[7];
+};
+
+static const struct Glyph FONT[] = {
+    {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}}, {'B', {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E}},
+    {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}}, {'M', {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}},
+    {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}}, {'O', {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}},
+    {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}}, {'V', {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04}},
+    {'Z', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F}}, {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}},
+    {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}}, {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}},
+    {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}}, {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}},
+    {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}}, {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}},
+    {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}}, {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}},
+    {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}}, {':', {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00}},
+    {'.', {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}},
+};
+
+/* Les 7 lignes du glyphe de c, ou NULL s'il n'est pas dans la police (espace). */
+static const unsigned char *glyph_rows(char c)
+{
+    for (size_t i = 0; i < sizeof FONT / sizeof FONT[0]; i++)
+        if (FONT[i].c == c)
+            return FONT[i].rows;
+    return NULL;
+}
+
+/* Écrit un texte en grosses lettres de néon, centré, en commençant à la
+ * ligne de pixels y. Chaque pixel de la police devient un carré de
+ * « scale » pixels de côté : la plus grande taille qui tient dans
+ * max_w x max_h. Renvoie la hauteur dessinée (0 si rien ne tient). */
+static int draw_big_text(const char *text, int y, int max_w, int max_h, struct Color color)
+{
+    int len = (int)strlen(text);
+    int width = len * 6 - 1; /* 5 pixels par lettre + 1 d'espace, sans espace après la dernière */
+    int scale = 0;
+    while (width * (scale + 1) <= max_w && 7 * (scale + 1) <= max_h)
+        scale++;
+    if (scale == 0)
+        return 0;
+
+    struct Color core = mix(color, WHITE, 0.5); /* cœur presque blanc, halo coloré */
+    int left = (screen_w - width * scale) / 2;
+    for (int i = 0; i < len; i++) {
+        const unsigned char *rows = glyph_rows(text[i]);
+        if (!rows)
+            continue;
+        for (int gy = 0; gy < 7; gy++) {
+            for (int gx = 0; gx < 5; gx++) {
+                if (!(rows[gy] & (0x10 >> gx)))
+                    continue;
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        int px = left + (i * 6 + gx) * scale + sx, py = y + gy * scale + sy;
+                        if (px < 0 || py < 0 || px >= screen_w || py >= screen_h)
+                            continue;
+                        pixels[py * screen_w + px] = core;
+                        add_light(px, py, color, 1.2);
+                    }
+                }
+            }
+        }
+    }
+    return 7 * scale;
+}
+
+/* Assombrit la scène (et sa lumière), pour que les titres ressortent. */
+static void dim_scene(double amount)
+{
+    for (int i = 0; i < screen_w * screen_h; i++) {
+        pixels[i] = mix(pixels[i], (struct Color){0, 0, 0}, amount);
+        light[i].r *= (float)(1 - amount);
+        light[i].g *= (float)(1 - amount);
+        light[i].b *= (float)(1 - amount);
+    }
+}
+
+/* Un temps en secondes, écrit « 01:23.4 ». */
+static void format_time(char *buf, size_t size, double seconds)
+{
+    int minutes = (int)(seconds / 60);
+    snprintf(buf, size, "%02d:%04.1f", minutes, seconds - minutes * 60);
+}
+
 /* Dessine une image complète de la scène dans « pixels ». */
-static void render_scene(const struct Player *p)
+static void render_scene(const struct Game *g)
 {
     /* Calque de lumière remis au noir. Des octets à 0 donnent bien 0.0 pour
      * un float (norme IEEE 754, celle de tous les ordinateurs actuels). */
     memset(light, 0, sizeof *light * (size_t)screen_w * (size_t)screen_h);
-    draw_floor_and_ceiling(p);
-    draw_walls(p);
+    draw_floor_and_ceiling(&g->player);
+    draw_walls(&g->player, g->clock);
+
+    /* Titres : deux lignes de grosses lettres, en haut de l'écran. */
+    int max_w = screen_w * 7 / 10, max_h = screen_h / 4, y = screen_h / 8;
+    if (g->screen == SCREEN_TITLE) {
+        dim_scene(0.4);
+        int h = draw_big_text("NEON", y, max_w, max_h, WALL_MAGENTA);
+        draw_big_text("MAZE", y + h + h / 4, max_w, max_h, WALL_CYAN);
+    } else if (g->screen == SCREEN_WON) {
+        char time_text[32];
+        format_time(time_text, sizeof time_text, g->elapsed);
+        dim_scene(0.4);
+        int h = draw_big_text("BRAVO", y, max_w, max_h, EXIT_COLOR);
+        draw_big_text(time_text, y + h + h / 4, max_w, max_h, WALL_CYAN);
+    }
+
     apply_bloom();
-    draw_minimap(p);
+    if (g->screen == SCREEN_PLAY)
+        draw_minimap(&g->player, g->clock);
 }
 
 /* ===================================================================
@@ -740,6 +990,7 @@ static int action_from_key(WORD vk)
     case 'D':                       return ACT_STRAFE_RIGHT;
     case VK_LEFT:                   return ACT_TURN_LEFT;
     case VK_RIGHT:                  return ACT_TURN_RIGHT;
+    case VK_RETURN: case VK_SPACE:  return ACT_CONFIRM;
     default:                        return ACT_NONE;
     }
 }
@@ -839,6 +1090,7 @@ static int action_from_key(int c)
     case 's':           return ACT_BACKWARD;
     case 'q': case 'a': return ACT_STRAFE_LEFT;
     case 'd':           return ACT_STRAFE_RIGHT;
+    case '\r': case '\n': case ' ': return ACT_CONFIRM;
     default:            return ACT_NONE;
     }
 }
@@ -888,6 +1140,7 @@ static int platform_key_state(int code)
  * =================================================================== */
 
 static bool action_held[ACT_COUNT];
+static bool confirm_pressed = false;        /* Entrée ou Espace vient d'être enfoncée */
 static int action_code[ACT_COUNT];         /* touche qui a déclenché l'action */
 static double action_release_at[ACT_COUNT]; /* si le système ne sait pas le dire */
 
@@ -896,6 +1149,9 @@ static void key_press(int action, int code, double now)
 {
     if (action == ACT_NONE)
         return;
+    /* Seulement au premier appui : tenir la touche ne doit pas valider deux fois. */
+    if (action == ACT_CONFIRM && !action_held[action])
+        confirm_pressed = true;
     action_release_at[action] = now + (action_held[action] ? KEY_REPEAT_HOLD : KEY_FIRST_HOLD);
     action_held[action] = true;
     action_code[action] = code;
@@ -930,13 +1186,22 @@ static void restore_terminal(void)
  * 10. BOUCLE PRINCIPALE
  * =================================================================== */
 
-/* Vrai si le joueur, centré en (x, y), toucherait un mur : on teste les
- * quatre coins du petit carré qui l'entoure. */
-static bool blocked(double x, double y)
+/* Ce que toucherait le joueur centré en (x, y). On teste les quatre coins
+ * du petit carré qui l'entoure (i va de 0 à 3 : son bit 1 choisit la
+ * gauche ou la droite, son bit 2 le haut ou le bas). Renvoie ' ' si rien
+ * n'est touché ; la sortie passe en priorité, pour ne pas la rater dans un coin. */
+static char touched_cell(double x, double y)
 {
     const double r = PLAYER_RADIUS;
-    return map_at((int)floor(x - r), (int)floor(y - r)) != ' ' || map_at((int)floor(x + r), (int)floor(y - r)) != ' ' ||
-           map_at((int)floor(x - r), (int)floor(y + r)) != ' ' || map_at((int)floor(x + r), (int)floor(y + r)) != ' ';
+    char found = ' ';
+    for (int i = 0; i < 4; i++) {
+        char c = map_at((int)floor(x + (i & 1 ? r : -r)), (int)floor(y + (i & 2 ? r : -r)));
+        if (c == 'X')
+            return 'X';
+        if (c != ' ')
+            found = c;
+    }
+    return found;
 }
 
 /* Tourne un vecteur (x, y) d'un angle en radians. */
@@ -947,36 +1212,131 @@ static void rotate(double *x, double *y, double angle)
     *y = old_x * sin(angle) + *y * cos(angle);
 }
 
-static void move_player(struct Player *p, double dt)
+/* Tourner = faire pivoter le regard ET le plan caméra du même angle. */
+static void turn_player(struct Player *p, double angle)
+{
+    rotate(&p->dir_x, &p->dir_y, angle);
+    rotate(&p->plane_x, &p->plane_y, angle);
+}
+
+/* Déplace le joueur selon les touches tenues. Renvoie vrai s'il touche la sortie. */
+static bool move_player(struct Player *p, double dt)
 {
     double turn = (action_held[ACT_TURN_RIGHT] ? 1 : 0) - (action_held[ACT_TURN_LEFT] ? 1 : 0);
     double forward = (action_held[ACT_FORWARD] ? 1 : 0) - (action_held[ACT_BACKWARD] ? 1 : 0);
     double strafe = (action_held[ACT_STRAFE_RIGHT] ? 1 : 0) - (action_held[ACT_STRAFE_LEFT] ? 1 : 0);
 
-    /* Tourner = faire pivoter le regard ET le plan caméra du même angle. */
-    if (turn != 0) {
-        rotate(&p->dir_x, &p->dir_y, turn * TURN_SPEED * dt);
-        rotate(&p->plane_x, &p->plane_y, turn * TURN_SPEED * dt);
-    }
+    if (turn != 0)
+        turn_player(p, turn * TURN_SPEED * dt);
 
     /* La droite du joueur est son regard tourné d'un quart de tour : (-dir_y, dir_x). */
     double dx = p->dir_x * forward - p->dir_y * strafe;
     double dy = p->dir_y * forward + p->dir_x * strafe;
     double len = sqrt(dx * dx + dy * dy);
     if (len == 0)
-        return;
+        return false;
     dx = dx / len * MOVE_SPEED * dt; /* même vitesse en diagonale */
     dy = dy / len * MOVE_SPEED * dt;
 
     /* x puis y séparément : contre un mur, on glisse le long au lieu de coller. */
-    if (!blocked(p->x + dx, p->y))
+    bool reached_exit = false;
+    char hit = touched_cell(p->x + dx, p->y);
+    if (hit == ' ')
         p->x += dx;
-    if (!blocked(p->x, p->y + dy))
+    reached_exit |= hit == 'X';
+    hit = touched_cell(p->x, p->y + dy);
+    if (hit == ' ')
         p->y += dy;
+    reached_exit |= hit == 'X';
+    return reached_exit;
 }
 
-int main(void)
+/* Le joueur au départ, au centre de la case (1, 1), le regard tourné vers
+ * le couloir ouvert (à droite, sinon en bas). */
+static void reset_player(struct Player *p)
 {
+    bool right_open = map_at(2, 1) == ' ';
+    p->x = 1.5;
+    p->y = 1.5;
+    p->dir_x = right_open ? 1 : 0;
+    p->dir_y = right_open ? 0 : 1;
+    /* le plan caméra : le regard tourné d'un quart de tour, de largeur FOV_PLANE */
+    p->plane_x = -p->dir_y * FOV_PLANE;
+    p->plane_y = p->dir_x * FOV_PLANE;
+}
+
+static void start_game(struct Game *g, double now)
+{
+    reset_player(&g->player);
+    memset(seen, 0, sizeof seen); /* la minimap repart dans le noir */
+    g->screen = SCREEN_PLAY;
+    g->start_time = now;
+}
+
+/* Largeur d'un texte à l'écran. En UTF-8, une lettre accentuée prend
+ * plusieurs octets mais une seule case : on ne compte que les octets qui
+ * commencent un caractère (tous sauf ceux de la forme 10xxxxxx). */
+static int text_width(const char *s)
+{
+    int w = 0;
+    for (; *s; s++)
+        if (((unsigned char)*s & 0xC0) != 0x80)
+            w++;
+    return w;
+}
+
+#define TEXT_STYLE "\x1b[48;2;0;0;0m\x1b[38;2;0;255;255m" /* texte cyan sur fond noir */
+
+/* Écrit une ligne de texte centrée sur la ligne « row » du terminal (1 = en haut). */
+static void overlay_text(int row, const char *text)
+{
+    int w = text_width(text);
+    if (w <= screen_w && row >= 1 && row <= screen_h / 2)
+        out_printf("\x1b[%d;%dH" TEXT_STYLE "%s\x1b[0m", row, (screen_w - w) / 2 + 1, text);
+}
+
+/* Les textes par-dessus l'image : consignes, chrono, record. */
+static void draw_texts(const struct Game *g, double now, double fps)
+{
+    int row = screen_h / 2 * 7 / 10; /* aux 7/10 de la hauteur, sous les titres */
+    char line[160], time_text[32];
+
+    switch (g->screen) {
+    case SCREEN_TITLE:
+        overlay_text(row, " Trouve la sortie dorée, le plus vite possible ");
+        overlay_text(row + 2, " ZQSD, WASD ou flèches : se déplacer ");
+        overlay_text(row + 4, " Entrée : jouer    Échap : quitter ");
+        break;
+    case SCREEN_PLAY:
+        /* le bandeau d'infos, en haut à gauche, seulement s'il tient */
+        format_time(time_text, sizeof time_text, now - g->start_time);
+        snprintf(line, sizeof line, " NEON MAZE | %s | %.0f images/s | Échap : quitter ", time_text, fps);
+        if (text_width(line) <= screen_w)
+            out_printf("\x1b[H" TEXT_STYLE "%s\x1b[0m", line);
+        break;
+    case SCREEN_WON:
+        format_time(time_text, sizeof time_text, g->best);
+        snprintf(line, sizeof line, " Record : %s ", time_text);
+        overlay_text(row, line);
+        overlay_text(row + 2, " Entrée : nouveau labyrinthe    Échap : quitter ");
+        break;
+    }
+}
+
+int main(int argc, char **argv)
+{
+    struct Game game = {.screen = SCREEN_TITLE, .maze_size = MAZE_SIZE};
+    if (argc > 1) {
+        game.maze_size = atoi(argv[1]); /* atoi rend 0 si ce n'est pas un nombre */
+        if (argc > 2 || game.maze_size < MAZE_MIN || game.maze_size > MAZE_MAX) {
+            fprintf(stderr, "Usage : %s [taille du labyrinthe, de %d à %d]\n", argv[0], MAZE_MIN, MAZE_MAX);
+            return 1;
+        }
+    }
+    srand((unsigned)time(NULL)); /* l'heure comme graine : un labyrinthe différent à chaque lancement */
+    generate_maze(game.maze_size);
+    reset_player(&game.player);
+
     platform_init();
     atexit(restore_terminal);
     /* écran alternatif (le terminal retrouve son contenu en quittant), curseur caché */
@@ -986,8 +1346,6 @@ int main(void)
     double next_frame = previous; /* heure prévue de la prochaine image */
     double fps_timer = previous, fps = 0.0;
     int frames = 0;
-    /* Départ en (1.5, 1.5) : le centre de la case (1, 1), regard vers la droite. */
-    struct Player player = {1.5, 1.5, 1.0, 0.0, 0.0, FOV_PLANE};
 
     while (!quit_requested) {
         double now = platform_now();
@@ -995,10 +1353,35 @@ int main(void)
         previous = now;
         if (dt > 0.1) /* après un gel (fenêtre déplacée…), pas de bond à travers les murs */
             dt = 0.1;
+        game.clock = now;
 
         platform_poll_input(now);
         update_held_actions(now);
-        move_player(&player, dt);
+        bool confirm = confirm_pressed;
+        confirm_pressed = false;
+
+        switch (game.screen) {
+        case SCREEN_TITLE:
+            turn_player(&game.player, 0.25 * dt); /* la caméra tourne lentement sur elle-même */
+            if (confirm)
+                start_game(&game, now);
+            break;
+        case SCREEN_PLAY:
+            if (move_player(&game.player, dt)) {
+                game.elapsed = now - game.start_time;
+                if (game.best == 0 || game.elapsed < game.best)
+                    game.best = game.elapsed;
+                game.screen = SCREEN_WON;
+            }
+            break;
+        case SCREEN_WON:
+            turn_player(&game.player, 0.25 * dt);
+            if (confirm) {
+                generate_maze(game.maze_size);
+                start_game(&game, now);
+            }
+            break;
+        }
 
         int cols, rows;
         platform_terminal_size(&cols, &rows);
@@ -1006,15 +1389,9 @@ int main(void)
             out_printf("\x1b[2J"); /* taille changée : on efface tout */
         resize_screen(cols, rows);
 
-        render_scene(&player);
+        render_scene(&game);
         draw_pixels();
-
-        /* Bandeau d'infos, seulement s'il tient sur la largeur. */
-        char hud[128];
-        int hud_len = snprintf(hud, sizeof hud, " NEON MAZE | %.0f images/s | %u Ko/image | Echap : quitter ", fps,
-                               (unsigned)(out_len / 1024));
-        if (hud_len > 0 && hud_len <= screen_w)
-            out_printf("\x1b[H\x1b[48;2;0;0;0m\x1b[38;2;0;255;255m%s\x1b[0m", hud);
+        draw_texts(&game, now, fps);
         out_printf("\x1b[?2026l"); /* fin de l'image synchronisée : le terminal peut afficher */
         out_flush();
 

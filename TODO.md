@@ -25,8 +25,12 @@
 - [x] Test de Leture dans Windows Terminal : validé le 2026-10-16, 60 images/s en plein écran (88 Ko par image)
 
 ## Phase 3 - Le jeu
-- [ ] Objectif (trouver la sortie, chrono) et/ou labyrinthe généré au hasard
-- [ ] Écran titre et fin de partie
+- [x] Labyrinthe aléatoire (backtracker + boucles), sortie en portail sur la case la plus éloignée (parcours en largeur), chrono, record (2026-10-16)
+- [x] Minimap avec brouillard de guerre (seules les cases vues apparaissent)
+- [x] Écran titre (caméra qui tourne, lettres néon) et écran de fin (temps, record, rejouer)
+- [x] Taille réglable : `./neon-maze 20` (de 4 à 30)
+- [ ] Test de Leture dans Windows Terminal (une partie complète)
+- [ ] Le fichier fait ~1 420 lignes : en rediscuter avant de dépasser 1 500 (règle du CLAUDE.md)
 
 ## Phase 4 - Publication
 - [ ] GitHub Actions : compilation à 0 avertissement sur Windows, Linux et macOS à chaque PR (seule façon de vérifier la partie Linux/macOS, pas de Linux sur le PC de Leture) + badge dans le README
