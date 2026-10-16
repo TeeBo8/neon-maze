@@ -21,6 +21,7 @@
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -36,6 +37,12 @@
  * =================================================================== */
 
 #define TARGET_FPS 60
+
+#define MOVE_SPEED 3.0     /* cases par seconde */
+#define TURN_SPEED 2.5     /* radians par seconde (un tour complet ≈ 2,5 s) */
+#define FOV_PLANE 0.66     /* largeur du plan caméra : 0.66 donne ~66° de champ de vision */
+#define PLAYER_RADIUS 0.2  /* le joueur est un petit carré, pour ne pas frôler les murs */
+#define FOG_DISTANCE 10.0  /* à cette distance (en cases), un mur a disparu dans le brouillard */
 
 /* Linux et macOS ne signalent pas quand une touche est relâchée : on la
  * considère tenue un petit moment après chaque appui. Le premier délai
@@ -64,6 +71,23 @@ struct Color {
     unsigned char r, g, b;
 };
 
+/* Le joueur : sa position sur la carte (en cases), la direction de son
+ * regard, et le « plan caméra », perpendiculaire au regard, qui représente
+ * l'écran. Chaque colonne de l'écran correspond à un point de ce plan. */
+struct Player {
+    double x, y;
+    double dir_x, dir_y;
+    double plane_x, plane_y;
+};
+
+/* Couleurs néon (rouge, vert, bleu). */
+static const struct Color FOG_COLOR = {12, 0, 28};    /* violet nuit, au loin */
+static const struct Color CEILING_COLOR = {45, 0, 80}; /* plafond, juste au-dessus du joueur */
+static const struct Color FLOOR_COLOR = {0, 45, 70};   /* sol, juste sous les pieds */
+static const struct Color WALL_CYAN = {0, 255, 255};
+static const struct Color WALL_MAGENTA = {255, 0, 200};
+static const struct Color WALL_LIME = {180, 255, 0};
+
 /* Mis à 1 pour quitter (Échap, Ctrl+C, fermeture). « volatile sig_atomic_t »
  * est le seul type qu'un gestionnaire de signal a le droit de modifier. */
 static volatile sig_atomic_t quit_requested = 0;
@@ -72,6 +96,52 @@ static volatile sig_atomic_t quit_requested = 0;
  * l'une l'autre, le compilateur doit connaître ces fonctions à l'avance. */
 static void key_press(int action, int code, double now);
 static int platform_key_state(int code);
+
+/* ===================================================================
+ * 3. CARTE
+ * =================================================================== */
+
+/* Vue de dessus : une case = un caractère. Espace = vide ; '#', 'M' et 'L'
+ * = murs cyan, magenta et vert. Toutes les lignes ont la même longueur,
+ * et le bord doit être fermé. Le joueur part de la case (1, 1), regard vers
+ * la droite. */
+static const char *const map[] = {
+    "################",
+    "#     #        #",
+    "#     #  MMMM  #",
+    "#  L  #     M  #",
+    "#     ####  M  #",
+    "#           M  #",
+    "#  ######      #",
+    "#  #    #  LL  #",
+    "#  #    #  LL  #",
+    "#  #           #",
+    "#     MMMM###  #",
+    "#            # #",
+    "#  LLLLL     # #",
+    "#      L       #",
+    "#      L       #",
+    "################",
+};
+#define MAP_H ((int)(sizeof map / sizeof map[0]))
+#define MAP_W ((int)strlen(map[0]))
+
+/* Contenu de la case (x, y) ; hors de la carte, c'est un mur. */
+static char map_at(int x, int y)
+{
+    if (x < 0 || y < 0 || x >= MAP_W || y >= MAP_H)
+        return '#';
+    return map[y][x];
+}
+
+static struct Color wall_color(char cell)
+{
+    switch (cell) {
+    case 'M': return WALL_MAGENTA;
+    case 'L': return WALL_LIME;
+    default:  return WALL_CYAN;
+    }
+}
 
 /* ===================================================================
  * 4. TAMPON D'IMAGE : un pixel = une couleur
@@ -219,9 +289,106 @@ static void draw_pixels(void)
 
 static void out_flush(void)
 {
-    fwrite(out_data, 1, out_len, stdout);
-    fflush(stdout);
+    /* Si l'écriture échoue, le terminal a disparu : on quitte. */
+    if (fwrite(out_data, 1, out_len, stdout) != out_len || fflush(stdout) != 0)
+        quit_requested = 1;
     out_len = 0;
+}
+
+/* ===================================================================
+ * 6. RAYCASTING : la 3D
+ * =================================================================== */
+
+/* Mélange deux couleurs : t = 0 donne a, t = 1 donne b. */
+static struct Color mix(struct Color a, struct Color b, double t)
+{
+    if (t < 0)
+        t = 0;
+    if (t > 1)
+        t = 1;
+    struct Color c;
+    c.r = (unsigned char)(a.r + (b.r - a.r) * t);
+    c.g = (unsigned char)(a.g + (b.g - a.g) * t);
+    c.b = (unsigned char)(a.b + (b.b - a.b) * t);
+    return c;
+}
+
+/* Plafond et sol : du plus clair (près du joueur) au brouillard (à l'horizon). */
+static void draw_floor_and_ceiling(void)
+{
+    int horizon = screen_h / 2;
+    for (int y = 0; y < screen_h; y++) {
+        bool ceiling = y < horizon;
+        /* 0 à l'horizon, 1 au bord haut ou bas de l'écran */
+        double nearness = ceiling ? (double)(horizon - y) / horizon : (double)(y - horizon) / (screen_h - horizon);
+        struct Color c = mix(FOG_COLOR, ceiling ? CEILING_COLOR : FLOOR_COLOR, nearness);
+        for (int x = 0; x < screen_w; x++)
+            pixels[y * screen_w + x] = c;
+    }
+}
+
+/* Pour chaque colonne de l'écran, on lance un rayon depuis le joueur et on
+ * le fait avancer case par case (algorithme DDA) jusqu'à toucher un mur.
+ * Plus le mur est loin, plus sa colonne est courte : c'est la perspective. */
+static void draw_walls(const struct Player *p)
+{
+    for (int x = 0; x < screen_w; x++) {
+        /* Position de la colonne sur le plan caméra : -1 à gauche, +1 à droite. */
+        double camera_x = 2.0 * x / screen_w - 1.0;
+        double ray_x = p->dir_x + p->plane_x * camera_x;
+        double ray_y = p->dir_y + p->plane_y * camera_x;
+
+        /* Case de départ, et distance que le rayon doit parcourir pour
+         * traverser une case entière en x (delta_x) ou en y (delta_y). */
+        int cell_x = (int)p->x, cell_y = (int)p->y;
+        double delta_x = ray_x == 0 ? 1e30 : fabs(1.0 / ray_x);
+        double delta_y = ray_y == 0 ? 1e30 : fabs(1.0 / ray_y);
+
+        /* Sens du pas (+1 ou -1) et distance jusqu'au premier bord de case. */
+        int step_x = ray_x < 0 ? -1 : 1;
+        int step_y = ray_y < 0 ? -1 : 1;
+        double side_x = (ray_x < 0 ? p->x - cell_x : cell_x + 1.0 - p->x) * delta_x;
+        double side_y = (ray_y < 0 ? p->y - cell_y : cell_y + 1.0 - p->y) * delta_y;
+
+        /* DDA : on saute toujours vers le bord de case le plus proche. */
+        bool hit_y_side = false; /* le mur touché est-il une face nord/sud ? */
+        char cell = ' ';
+        while (cell == ' ') {
+            if (side_x < side_y) {
+                side_x += delta_x;
+                cell_x += step_x;
+                hit_y_side = false;
+            } else {
+                side_y += delta_y;
+                cell_y += step_y;
+                hit_y_side = true;
+            }
+            cell = map_at(cell_x, cell_y);
+        }
+
+        /* Distance perpendiculaire au plan caméra, et non distance réelle
+         * jusqu'au joueur : sinon les murs se bomberaient (effet « fish-eye »). */
+        double dist = hit_y_side ? side_y - delta_y : side_x - delta_x;
+        if (dist < 1e-4)
+            dist = 1e-4;
+
+        int wall_h = (int)(screen_h / dist);
+        int top = screen_h / 2 - wall_h / 2;
+        int bottom = top + wall_h;
+        if (top < 0)
+            top = 0;
+        if (bottom > screen_h)
+            bottom = screen_h;
+
+        /* Faces nord/sud plus sombres pour le relief, puis brouillard. */
+        struct Color c = wall_color(cell);
+        if (hit_y_side)
+            c = mix(c, (struct Color){0, 0, 0}, 0.35);
+        c = mix(c, FOG_COLOR, dist / FOG_DISTANCE);
+
+        for (int y = top; y < bottom; y++)
+            pixels[y * screen_w + x] = c;
+    }
 }
 
 /* ===================================================================
@@ -243,7 +410,11 @@ static LARGE_INTEGER clock_freq;
 /* Appelée par Windows à la fermeture de la fenêtre ou sur Ctrl+Pause. */
 static BOOL WINAPI on_console_event(DWORD type)
 {
-    (void)type;
+    /* Fenêtre ou terminal fermé : il n'y a plus rien à restaurer, et la
+     * boucle principale peut être bloquée sur une écriture qui n'aboutira
+     * jamais. On arrête le programme tout de suite. */
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT)
+        ExitProcess(0);
     quit_requested = 1;
     return TRUE;
 }
@@ -509,6 +680,51 @@ static void restore_terminal(void)
  * 10. BOUCLE PRINCIPALE
  * =================================================================== */
 
+/* Vrai si le joueur, centré en (x, y), toucherait un mur : on teste les
+ * quatre coins du petit carré qui l'entoure. */
+static bool blocked(double x, double y)
+{
+    const double r = PLAYER_RADIUS;
+    return map_at((int)floor(x - r), (int)floor(y - r)) != ' ' || map_at((int)floor(x + r), (int)floor(y - r)) != ' ' ||
+           map_at((int)floor(x - r), (int)floor(y + r)) != ' ' || map_at((int)floor(x + r), (int)floor(y + r)) != ' ';
+}
+
+/* Tourne un vecteur (x, y) d'un angle en radians. */
+static void rotate(double *x, double *y, double angle)
+{
+    double old_x = *x;
+    *x = old_x * cos(angle) - *y * sin(angle);
+    *y = old_x * sin(angle) + *y * cos(angle);
+}
+
+static void move_player(struct Player *p, double dt)
+{
+    double turn = (action_held[ACT_TURN_RIGHT] ? 1 : 0) - (action_held[ACT_TURN_LEFT] ? 1 : 0);
+    double forward = (action_held[ACT_FORWARD] ? 1 : 0) - (action_held[ACT_BACKWARD] ? 1 : 0);
+    double strafe = (action_held[ACT_STRAFE_RIGHT] ? 1 : 0) - (action_held[ACT_STRAFE_LEFT] ? 1 : 0);
+
+    /* Tourner = faire pivoter le regard ET le plan caméra du même angle. */
+    if (turn != 0) {
+        rotate(&p->dir_x, &p->dir_y, turn * TURN_SPEED * dt);
+        rotate(&p->plane_x, &p->plane_y, turn * TURN_SPEED * dt);
+    }
+
+    /* La droite du joueur est son regard tourné d'un quart de tour : (-dir_y, dir_x). */
+    double dx = p->dir_x * forward - p->dir_y * strafe;
+    double dy = p->dir_y * forward + p->dir_x * strafe;
+    double len = sqrt(dx * dx + dy * dy);
+    if (len == 0)
+        return;
+    dx = dx / len * MOVE_SPEED * dt; /* même vitesse en diagonale */
+    dy = dy / len * MOVE_SPEED * dt;
+
+    /* x puis y séparément : contre un mur, on glisse le long au lieu de coller. */
+    if (!blocked(p->x + dx, p->y))
+        p->x += dx;
+    if (!blocked(p->x, p->y + dy))
+        p->y += dy;
+}
+
 int main(void)
 {
     platform_init();
@@ -520,16 +736,19 @@ int main(void)
     double next_frame = previous; /* heure prévue de la prochaine image */
     double fps_timer = previous, fps = 0.0;
     int frames = 0;
-    double t = 0.0; /* temps de l'animation, en secondes */
+    /* Départ en (1.5, 1.5) : le centre de la case (1, 1), regard vers la droite. */
+    struct Player player = {1.5, 1.5, 1.0, 0.0, 0.0, FOV_PLANE};
 
     while (!quit_requested) {
         double now = platform_now();
         double dt = now - previous; /* temps écoulé depuis l'image précédente */
         previous = now;
-        t += dt;
+        if (dt > 0.1) /* après un gel (fenêtre déplacée…), pas de bond à travers les murs */
+            dt = 0.1;
 
         platform_poll_input(now);
         update_held_actions(now);
+        move_player(&player, dt);
 
         int cols, rows;
         platform_terminal_size(&cols, &rows);
@@ -537,21 +756,16 @@ int main(void)
             out_printf("\x1b[2J"); /* taille changée : on efface tout */
         resize_screen(cols, rows);
 
-        /* Test de charge : un « plasma » où chaque pixel change à chaque
-         * image, le pire cas pour le terminal. */
-        for (int y = 0; y < screen_h; y++) {
-            for (int x = 0; x < screen_w; x++) {
-                struct Color *p = &pixels[y * screen_w + x];
-                p->r = (unsigned char)(127.5 + 127.5 * sin(x * 0.10 + t));
-                p->g = (unsigned char)(127.5 + 127.5 * sin(y * 0.15 - t * 1.3));
-                p->b = (unsigned char)(127.5 + 127.5 * sin((x + y) * 0.07 + t * 0.7));
-            }
-        }
+        draw_floor_and_ceiling();
+        draw_walls(&player);
         draw_pixels();
-        size_t frame_bytes = out_len;
-        out_printf("\x1b[H\x1b[48;2;0;0;0m\x1b[38;2;0;255;255m NEON MAZE - test de charge | %dx%d pixels | "
-                   "%.0f images/s | %u Ko par image | Echap pour quitter \x1b[0m",
-                   screen_w, screen_h, fps, (unsigned)(frame_bytes / 1024));
+
+        /* Bandeau d'infos, seulement s'il tient sur la largeur. */
+        char hud[128];
+        int hud_len = snprintf(hud, sizeof hud, " NEON MAZE | %.0f images/s | %u Ko/image | Echap : quitter ", fps,
+                               (unsigned)(out_len / 1024));
+        if (hud_len > 0 && hud_len <= screen_w)
+            out_printf("\x1b[H\x1b[48;2;0;0;0m\x1b[38;2;0;255;255m%s\x1b[0m", hud);
         out_printf("\x1b[?2026l"); /* fin de l'image synchronisée : le terminal peut afficher */
         out_flush();
 
