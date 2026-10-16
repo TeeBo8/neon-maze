@@ -145,6 +145,7 @@ static volatile sig_atomic_t quit_requested = 0;
 static void key_press(int action, double now);
 static int platform_action_state(int action);
 static void die(const char *message);
+static void platform_print_error(const char *message);
 
 /* ===================================================================
  * 3. CARTE
@@ -1016,6 +1017,18 @@ static void platform_poll_input(double now)
     }
 }
 
+/* Écrit un message d'erreur. La console de Windows n'affiche bien les
+ * accents qu'en UTF-8 : on l'y passe le temps du message, puis on remet
+ * son réglage d'origine. */
+static void platform_print_error(const char *message)
+{
+    UINT codepage = GetConsoleOutputCP();
+    SetConsoleOutputCP(CP_UTF8);
+    fprintf(stderr, "%s\n", message);
+    fflush(stderr);
+    SetConsoleOutputCP(codepage);
+}
+
 /* Windows sait si une touche est enfoncée en ce moment même. Une action
  * reste tenue tant qu'UNE de ses touches l'est : Z et ↑ font avancer tous
  * les deux, relâcher l'une ne doit pas arrêter le joueur. La liste reprend
@@ -1159,6 +1172,11 @@ static void platform_poll_input(double now)
     input_len -= i;
 }
 
+static void platform_print_error(const char *message)
+{
+    fprintf(stderr, "%s\n", message);
+}
+
 /* Un terminal Linux ou macOS ne dit pas si une touche est enfoncée. */
 static int platform_action_state(int action)
 {
@@ -1225,7 +1243,7 @@ static void restore_terminal(void)
 static void die(const char *message)
 {
     restore_terminal();
-    fprintf(stderr, "%s\n", message);
+    platform_print_error(message);
     exit(1);
 }
 
@@ -1378,8 +1396,9 @@ int main(int argc, char **argv)
         char *end;
         long size = strtol(argv[1], &end, 10);
         if (argc > 2 || *end != '\0' || size < MAZE_MIN || size > MAZE_MAX) {
-            fprintf(stderr, "Usage : %s [taille du labyrinthe, de %d à %d]\n", argv[0], MAZE_MIN, MAZE_MAX);
-            return 1;
+            char usage[512];
+            snprintf(usage, sizeof usage, "Usage : %s [taille du labyrinthe, de %d à %d]", argv[0], MAZE_MIN, MAZE_MAX);
+            die(usage);
         }
         game.maze_size = (int)size;
     }

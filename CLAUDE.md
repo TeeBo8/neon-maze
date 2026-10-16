@@ -14,10 +14,15 @@ Un labyrinthe en 3D en vue subjective (façon Wolfenstein 3D), **affiché dans l
 
 ## État au 2026-10-16
 
-- Repo **privé** TeeBo8/neon-maze créé le 2026-10-16 (le passage en public reste la décision de Leture).
-- Phase 1 (terminal, clavier, raycasting, déplacements) testée par Leture, PR #1. Phase 2 (néon, halo, grille, minimap) fusionnée (PR #2). Phase 3 (le jeu : labyrinthe aléatoire, portail de sortie, chrono, écrans titre et fin) sur `feat/jeu`.
+- **Jeu complet et public** : https://github.com/TeeBo8/neon-maze (passé en public par Leture le 2026-10-16), licence MIT, README avec GIF, sujets, image d'aperçu, Discussions activées.
+- Phases 1 à 4 faites, revue à froid faite, succès Quickdraw obtenu (issue #6 fermée en 57 s).
+- **CI GitHub Actions** : compilation `-Werror` sur Windows, Linux et macOS (+ clang), et lancement du jeu dans un faux terminal sous Linux. C'est le seul moyen de vérifier la partie Linux/macOS.
 - **Terminal conseillé : Windows Terminal.** Celui de VS Code saccade dès que l'image est lourde.
-- **Outil de capture, hors git** : `sh build/shots.sh` compile le jeu et `build/snapshot.c`, puis enregistre quelques vues en PNG dans `build/`, avec le temps de rendu et le poids de chaque image. Ça permet de vérifier le rendu sans lancer le jeu. Windows (Smart App Control) bloque parfois un exécutable déjà vu dont le contenu a changé : le script donne donc un nom neuf à l'outil à chaque fois.
+- **Outils hors git, dans `build/`** :
+  - `sh build/shots.sh` : compile le jeu et `build/snapshot.c`, puis enregistre des vues en PNG avec le temps de rendu et le poids de chaque image. Ça permet de vérifier le rendu sans lancer le jeu.
+  - `build/gif.c` + `python build/make_gif.py` : refont `docs/apercu.gif` (course sur le plus court chemin).
+  - Windows (Smart App Control) bloque parfois un exécutable déjà vu dont le contenu a changé : compiler les outils sous un nom neuf à chaque fois.
+- Le fichier fait 1 495 lignes (2026-10-16), soit la limite des ~1 500 : toute nouvelle fonction se discute avec Leture (alléger ou assumer un peu plus).
 
 ## Stack
 

@@ -30,7 +30,7 @@
 - [x] Écran titre (caméra qui tourne, lettres néon) et écran de fin (temps, record, rejouer)
 - [x] Taille réglable : `./neon-maze 20` (de 4 à 30)
 - [x] Test de Leture dans Windows Terminal : partie complète validée le 2026-10-16
-- [ ] Le fichier fait ~1 420 lignes : en rediscuter avant de dépasser 1 500 (règle du CLAUDE.md)
+- [ ] Le fichier fait 1 495 lignes : à la limite des ~1 500, à rediscuter avant toute nouvelle fonction
 
 ## Phase 4 - Publication
 - [x] GitHub Actions : compilation à 0 avertissement (`-Werror`) sur Windows, Linux et macOS + clang, et lancement du jeu dans un faux terminal sous Linux (Échap → sortie propre), vert le 2026-10-16
@@ -39,6 +39,7 @@
 - [x] Image d'aperçu pour les partages (envoyée par Leture le 2026-10-16) : `D:/_journal/neon-maze/apercu-social-1280x640.png`, à envoyer par Leture dans Settings → Social preview
 - [x] Revue à froid (2026-10-16) : aucun bug mémoire ; 9 corrections (PR #4). Restent pour le README : sous Linux/macOS, deux touches tenues à la fois ne marchent pas bien (le terminal ne répète que la dernière) ; ▀ peut s'afficher sur deux cases dans un terminal réglé en chinois, japonais ou coréen
 - [x] Repo GitHub public (Leture, 2026-10-16) + description + sujets
-- [ ] Ligne sur le profil GitHub
-- [ ] Succès GitHub « Quickdraw » : une fois le repo public, ouvrir une issue pour un vrai petit défaut et la fermer en moins de 5 min avec sa correction
-- [ ] Activer les Discussions (succès « Galaxy Brain » : répondre aux questions des visiteurs)
+- [x] Ligne sur le profil GitHub (PR TeeBo8/TeeBo8#8, à fusionner par Leture)
+- [x] Succès GitHub « Quickdraw » : issue #6 (deux touches d'une même action sous Windows) fermée en 57 s par la PR #7 (2026-10-16)
+- [x] Discussions activées (2026-10-16)
+- [ ] Succès « Galaxy Brain » : répondre aux questions des visiteurs dans les Discussions
