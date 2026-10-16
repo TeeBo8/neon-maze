@@ -142,8 +142,8 @@ static volatile sig_atomic_t quit_requested = 0;
 
 /* Prototypes : la section clavier et la section plateforme s'appellent
  * l'une l'autre, le compilateur doit connaître ces fonctions à l'avance. */
-static void key_press(int action, int code, double now);
-static int platform_key_state(int code);
+static void key_press(int action, double now);
+static int platform_action_state(int action);
 static void die(const char *message);
 
 /* ===================================================================
@@ -1011,15 +1011,22 @@ static void platform_poll_input(double now)
             if (key->wVirtualKeyCode == VK_ESCAPE || key->uChar.UnicodeChar == 3) /* 3 = Ctrl+C */
                 quit_requested = 1;
             else
-                key_press(action_from_key(key->wVirtualKeyCode), key->wVirtualKeyCode, now);
+                key_press(action_from_key(key->wVirtualKeyCode), now);
         }
     }
 }
 
-/* Windows sait si une touche est enfoncée en ce moment même. */
-static int platform_key_state(int code)
+/* Windows sait si une touche est enfoncée en ce moment même. Une action
+ * reste tenue tant qu'UNE de ses touches l'est : Z et ↑ font avancer tous
+ * les deux, relâcher l'une ne doit pas arrêter le joueur. La liste reprend
+ * les touches de action_from_key, à garder à jour avec elle. */
+static int platform_action_state(int action)
 {
-    return (GetAsyncKeyState(code) & 0x8000) ? 1 : 0;
+    static const WORD keys[] = {'Z', 'W', 'S', 'Q', 'A', 'D', VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_RETURN, VK_SPACE};
+    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
+        if (action_from_key(keys[i]) == action && (GetAsyncKeyState(keys[i]) & 0x8000))
+            return 1;
+    return 0;
 }
 
 #else /* Linux, macOS */
@@ -1135,7 +1142,7 @@ static void platform_poll_input(double now)
                 break;
             }
             if (arrow_start) {
-                key_press(action_from_arrow(input[i + 2]), 1000 + input[i + 2], now);
+                key_press(action_from_arrow(input[i + 2]), now);
                 i += 3;
             } else {
                 i += 2; /* Échap suivi d'une touche : c'est Alt + touche, ignorée */
@@ -1144,7 +1151,7 @@ static void platform_poll_input(double now)
             if (c == 3) /* Ctrl+C */
                 quit_requested = 1;
             else
-                key_press(action_from_key(tolower(c)), tolower(c), now);
+                key_press(action_from_key(tolower(c)), now);
             i++;
         }
     }
@@ -1153,9 +1160,9 @@ static void platform_poll_input(double now)
 }
 
 /* Un terminal Linux ou macOS ne dit pas si une touche est enfoncée. */
-static int platform_key_state(int code)
+static int platform_action_state(int action)
 {
-    (void)code;
+    (void)action;
     return -1;
 }
 
@@ -1167,11 +1174,10 @@ static int platform_key_state(int code)
 
 static bool action_held[ACT_COUNT];
 static bool confirm_pressed = false;        /* Entrée ou Espace vient d'être enfoncée */
-static int action_code[ACT_COUNT];         /* touche qui a déclenché l'action */
 static double action_release_at[ACT_COUNT]; /* si le système ne sait pas le dire */
 
 /* Appelée par la plateforme à chaque appui (ou répétition automatique). */
-static void key_press(int action, int code, double now)
+static void key_press(int action, double now)
 {
     if (action == ACT_NONE)
         return;
@@ -1180,16 +1186,15 @@ static void key_press(int action, int code, double now)
         confirm_pressed = true;
     action_release_at[action] = now + (action_held[action] ? KEY_REPEAT_HOLD : KEY_FIRST_HOLD);
     action_held[action] = true;
-    action_code[action] = code;
 }
 
-/* Relâche les actions dont la touche n'est plus enfoncée. */
+/* Relâche les actions dont aucune touche n'est plus enfoncée. */
 static void update_held_actions(double now)
 {
     for (int a = 0; a < ACT_COUNT; a++) {
         if (!action_held[a])
             continue;
-        int state = platform_key_state(action_code[a]);
+        int state = platform_action_state(a);
         if (state == 0 || (state == -1 && now >= action_release_at[a]))
             action_held[a] = false;
     }
