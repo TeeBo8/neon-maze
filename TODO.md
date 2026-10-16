@@ -39,6 +39,7 @@
 - [x] Image d'aperçu pour les partages (envoyée par Leture le 2026-10-16) : `D:/_journal/neon-maze/apercu-social-1280x640.png`, à envoyer par Leture dans Settings → Social preview
 - [x] Revue à froid (2026-10-16) : aucun bug mémoire ; 9 corrections (PR #4). Restent pour le README : sous Linux/macOS, deux touches tenues à la fois ne marchent pas bien (le terminal ne répète que la dernière) ; ▀ peut s'afficher sur deux cases dans un terminal réglé en chinois, japonais ou coréen
 - [x] Repo GitHub public (Leture, 2026-10-16) + description + sujets
-- [ ] Ligne sur le profil GitHub
-- [ ] Succès GitHub « Quickdraw » : une fois le repo public, ouvrir une issue pour un vrai petit défaut et la fermer en moins de 5 min avec sa correction
-- [ ] Activer les Discussions (succès « Galaxy Brain » : répondre aux questions des visiteurs)
+- [x] Ligne sur le profil GitHub (PR TeeBo8/TeeBo8#8, à fusionner par Leture)
+- [x] Succès GitHub « Quickdraw » : issue #6 (deux touches d'une même action sous Windows) fermée en 57 s par la PR #7 (2026-10-16)
+- [x] Discussions activées (2026-10-16)
+- [ ] Succès « Galaxy Brain » : répondre aux questions des visiteurs dans les Discussions
