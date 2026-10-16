@@ -37,12 +37,21 @@
  * =================================================================== */
 
 #define TARGET_FPS 60
+#define COLOR_TOLERANCE 4 /* écart de couleur (sur 255) qu'on ne prend pas la peine d'envoyer */
 
 #define MOVE_SPEED 3.0     /* cases par seconde */
 #define TURN_SPEED 2.5     /* radians par seconde (un tour complet ≈ 2,5 s) */
 #define FOV_PLANE 0.66     /* largeur du plan caméra : 0.66 donne ~66° de champ de vision */
 #define PLAYER_RADIUS 0.2  /* le joueur est un petit carré, pour ne pas frôler les murs */
 #define FOG_DISTANCE 10.0  /* à cette distance (en cases), un mur a disparu dans le brouillard */
+
+/* Néon */
+#define LINE_WIDTH 1.3      /* épaisseur des tubes de néon, en pixels */
+#define WALL_FACE 0.16      /* luminosité de la face d'un mur entre ses tubes (0 à 1) */
+#define PANEL_LINE 0.30     /* jointure entre deux cases d'un même mur, moins vive qu'une arête */
+#define FLOOR_GRID 0.85     /* intensité de la grille du sol */
+#define CEILING_GRID 0.18   /* intensité de la grille du plafond */
+#define BLOOM_STRENGTH 1.4  /* force du halo autour des néons */
 
 /* Linux et macOS ne signalent pas quand une touche est relâchée : on la
  * considère tenue un petit moment après chaque appui. Le premier délai
@@ -80,13 +89,24 @@ struct Player {
     double plane_x, plane_y;
 };
 
+/* Une lumière : comme une couleur, mais en nombres à virgule, pour pouvoir
+ * additionner plusieurs lueurs sans être bloqué à 255. */
+struct Light {
+    float r, g, b;
+};
+
 /* Couleurs néon (rouge, vert, bleu). */
-static const struct Color FOG_COLOR = {12, 0, 28};    /* violet nuit, au loin */
-static const struct Color CEILING_COLOR = {45, 0, 80}; /* plafond, juste au-dessus du joueur */
-static const struct Color FLOOR_COLOR = {0, 45, 70};   /* sol, juste sous les pieds */
+static const struct Color FOG_COLOR = {12, 0, 28};     /* violet nuit, au loin */
+static const struct Color CEILING_COLOR = {30, 0, 60}; /* plafond, juste au-dessus du joueur */
+static const struct Color FLOOR_COLOR = {20, 0, 45};   /* sol, juste sous les pieds */
+static const struct Color FLOOR_GRID_COLOR = {255, 30, 190};
+static const struct Color CEILING_GRID_COLOR = {120, 60, 255};
 static const struct Color WALL_CYAN = {0, 255, 255};
 static const struct Color WALL_MAGENTA = {255, 0, 200};
 static const struct Color WALL_LIME = {180, 255, 0};
+static const struct Color WHITE = {255, 255, 255};
+static const struct Color MINIMAP_PLAYER = {255, 255, 255};
+static const struct Color MINIMAP_VIEW = {255, 220, 0};
 
 /* Mis à 1 pour quitter (Échap, Ctrl+C, fermeture). « volatile sig_atomic_t »
  * est le seul type qu'un gestionnaire de signal a le droit de modifier. */
@@ -154,6 +174,22 @@ static struct Color wall_color(char cell)
 static struct Color *pixels = NULL;
 static int screen_w = 0, screen_h = 0;
 
+/* Calque de lumière, de la même taille que l'image : les néons y déposent
+ * leur éclat, qui est ensuite flouté et ajouté à l'image (le « halo »).
+ * light_tmp sert d'étape intermédiaire pendant le flou. */
+static struct Light *light = NULL, *light_tmp = NULL;
+
+/* Réserve de la mémoire, ou quitte s'il n'y en a plus. */
+static void *alloc_or_die(size_t bytes)
+{
+    void *p = malloc(bytes);
+    if (!p) {
+        fputs("Plus de mémoire.\n", stderr);
+        exit(1);
+    }
+    return p;
+}
+
 /* (Ré)alloue l'image si la taille du terminal a changé. */
 static void resize_screen(int cols, int rows)
 {
@@ -163,12 +199,13 @@ static void resize_screen(int cols, int rows)
         rows = 1;
     if (cols == screen_w && rows * 2 == screen_h)
         return;
+    size_t count = (size_t)cols * (size_t)rows * 2;
     free(pixels); /* free(NULL) ne fait rien : sûr au premier appel */
-    pixels = malloc(sizeof *pixels * (size_t)cols * (size_t)rows * 2);
-    if (!pixels) {
-        fputs("Plus de mémoire.\n", stderr);
-        exit(1);
-    }
+    free(light);
+    free(light_tmp);
+    pixels = alloc_or_die(sizeof *pixels * count);
+    light = alloc_or_die(sizeof *light * count);
+    light_tmp = alloc_or_die(sizeof *light_tmp * count);
     screen_w = cols;
     screen_h = rows * 2;
 }
@@ -248,15 +285,18 @@ static void out_color(int layer, struct Color c)
     out_data[out_len++] = 'm';
 }
 
-static bool same_color(struct Color a, struct Color b)
+/* Vrai si l'œil ne voit pas la différence entre deux couleurs : on garde
+ * alors celle déjà envoyée, ce qui allège beaucoup l'image (le halo crée
+ * des dégradés où chaque pixel diffère à peine de son voisin). */
+static bool close_color(struct Color a, struct Color b)
 {
-    return a.r == b.r && a.g == b.g && a.b == b.b;
+    return abs(a.r - b.r) <= COLOR_TOLERANCE && abs(a.g - b.g) <= COLOR_TOLERANCE && abs(a.b - b.b) <= COLOR_TOLERANCE;
 }
 
 /* Convertit l'image en texte. Chaque caractère est un demi-bloc ▀ : sa
  * couleur de texte peint le pixel du haut, sa couleur de fond celui du bas.
- * On ne réécrit une couleur que si elle change : souvent, deux caractères
- * voisins ont les mêmes, et le terminal reçoit alors bien moins d'octets. */
+ * On ne réécrit une couleur que si elle change visiblement : souvent, deux
+ * caractères voisins ont les mêmes, et le terminal reçoit bien moins d'octets. */
 static void draw_pixels(void)
 {
     struct Color fg = {0, 0, 0}, bg = {0, 0, 0};
@@ -271,12 +311,16 @@ static void draw_pixels(void)
         for (int x = 0; x < screen_w; x++) {
             struct Color top = pixels[y * screen_w + x];
             struct Color bottom = pixels[(y + 1) * screen_w + x];
-            if (first || !same_color(top, fg))
+            /* fg et bg retiennent les couleurs vraiment envoyées : comparer à
+             * elles empêche les petits écarts de s'accumuler. */
+            if (first || !close_color(top, fg)) {
                 out_color(38, top);
-            if (first || !same_color(bottom, bg))
+                fg = top;
+            }
+            if (first || !close_color(bottom, bg)) {
                 out_color(48, bottom);
-            fg = top;
-            bg = bottom;
+                bg = bottom;
+            }
             first = false;
             out_reserve(3);
             out_data[out_len++] = '\xe2'; /* ▀ s'écrit en 3 octets en UTF-8 */
@@ -313,28 +357,103 @@ static struct Color mix(struct Color a, struct Color b, double t)
     return c;
 }
 
-/* Plafond et sol : du plus clair (près du joueur) au brouillard (à l'horizon). */
-static void draw_floor_and_ceiling(void)
+/* Ajoute la lumière b (multipliée par k) à la couleur a, sans dépasser 255. */
+static struct Color add(struct Color a, struct Color b, double k)
 {
-    int horizon = screen_h / 2;
+    struct Color c;
+    c.r = (unsigned char)fmin(255.0, a.r + b.r * k);
+    c.g = (unsigned char)fmin(255.0, a.g + b.g * k);
+    c.b = (unsigned char)fmin(255.0, a.b + b.b * k);
+    return c;
+}
+
+static double clamp01(double v)
+{
+    return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/* Intensité d'un tube de néon, vu à « e » pixels de son centre :
+ * 1 sur le tube, 0 dès qu'on s'en éloigne, avec un bord adouci. */
+static double neon_line(double e)
+{
+    return clamp01(LINE_WIDTH - e);
+}
+
+/* Dépose l'éclat d'un néon dans le calque de lumière, pour le halo. */
+static void add_light(int x, int y, struct Color c, double k)
+{
+    struct Light *l = &light[y * screen_w + x];
+    l->r += (float)(c.r * k);
+    l->g += (float)(c.g * k);
+    l->b += (float)(c.b * k);
+}
+
+/* Distance focale, en pixels : un mur d'une case de haut, à une case de
+ * distance, mesure focal pixels à l'écran. Elle dépend de la largeur de
+ * l'écran et du champ de vision, pas de la hauteur : les proportions
+ * restent justes quelle que soit la forme du terminal. */
+static double focal_length(void)
+{
+    return screen_w / (2.0 * FOV_PLANE);
+}
+
+/* Sol et plafond : une grille de néon posée sur les cases de la carte.
+ * Les yeux du joueur sont à mi-hauteur des murs. Chaque ligne de l'écran
+ * sous l'horizon montre le sol à une certaine distance (plus la ligne est
+ * basse, plus le sol est près). Pour chaque pixel, on calcule le point du
+ * sol visé : s'il tombe près d'une ligne de la grille (une coordonnée
+ * entière), il s'allume. Le plafond est le reflet du sol. */
+static void draw_floor_and_ceiling(const struct Player *p)
+{
+    double focal = focal_length();
+    double horizon = screen_h / 2.0;
+    /* rayon du bord gauche de l'écran, et écart jusqu'à celui du bord droit */
+    double left_x = p->dir_x - p->plane_x, left_y = p->dir_y - p->plane_y;
+    double span_x = 2 * p->plane_x, span_y = 2 * p->plane_y;
+
     for (int y = 0; y < screen_h; y++) {
         bool ceiling = y < horizon;
-        /* 0 à l'horizon, 1 au bord haut ou bas de l'écran */
-        double nearness = ceiling ? (double)(horizon - y) / horizon : (double)(y - horizon) / (screen_h - horizon);
-        struct Color c = mix(FOG_COLOR, ceiling ? CEILING_COLOR : FLOOR_COLOR, nearness);
-        for (int x = 0; x < screen_w; x++)
-            pixels[y * screen_w + x] = c;
+        double offset = fabs(y + 0.5 - horizon);                 /* pixels d'écart avec l'horizon */
+        double row_dist = 0.5 * focal / offset;                  /* distance du sol montré par cette ligne */
+        double row_step = row_dist - 0.5 * focal / (offset + 1); /* distance gagnée d'une ligne à l'autre */
+        double fog = clamp01(row_dist / FOG_DISTANCE);
+        struct Color base = mix(ceiling ? CEILING_COLOR : FLOOR_COLOR, FOG_COLOR, fog);
+        struct Color grid_color = ceiling ? CEILING_GRID_COLOR : FLOOR_GRID_COLOR;
+        double grid = (ceiling ? CEILING_GRID : FLOOR_GRID) * (1 - fog);
+
+        for (int x = 0; x < screen_w; x++) {
+            double t = (x + 0.5) / screen_w;
+            double ray_x = left_x + span_x * t, ray_y = left_y + span_y * t;
+            double world_x = p->x + row_dist * ray_x, world_y = p->y + row_dist * ray_y;
+            /* Taille d'un pixel posé sur le sol, en cases, sur chaque axe
+             * (le 1e-9 évite une division par zéro). */
+            double size_x = fabs(row_dist * span_x / screen_w) + fabs(row_step * ray_x) + 1e-9;
+            double size_y = fabs(row_dist * span_y / screen_w) + fabs(row_step * ray_y) + 1e-9;
+            /* Écart avec la ligne de grille la plus proche, en pixels. Au loin,
+             * les lignes se serrent au point de se mélanger : on les efface. */
+            double line_x = neon_line(fabs(world_x - floor(world_x + 0.5)) / size_x) * clamp01(2 - 4 * size_x);
+            double line_y = neon_line(fabs(world_y - floor(world_y + 0.5)) / size_y) * clamp01(2 - 4 * size_y);
+            double k = fmax(line_x, line_y) * grid;
+
+            pixels[y * screen_w + x] = add(base, grid_color, k);
+            if (!ceiling)
+                add_light(x, y, grid_color, k * 0.5);
+        }
     }
 }
 
 /* Pour chaque colonne de l'écran, on lance un rayon depuis le joueur et on
  * le fait avancer case par case (algorithme DDA) jusqu'à toucher un mur.
- * Plus le mur est loin, plus sa colonne est courte : c'est la perspective. */
+ * Plus le mur est loin, plus sa colonne est courte : c'est la perspective.
+ * Chaque mur est une face sombre bordée de tubes de néon. */
 static void draw_walls(const struct Player *p)
 {
+    double focal = focal_length();
+    double horizon = screen_h / 2.0;
+
     for (int x = 0; x < screen_w; x++) {
         /* Position de la colonne sur le plan caméra : -1 à gauche, +1 à droite. */
-        double camera_x = 2.0 * x / screen_w - 1.0;
+        double camera_x = 2.0 * (x + 0.5) / screen_w - 1.0;
         double ray_x = p->dir_x + p->plane_x * camera_x;
         double ray_y = p->dir_y + p->plane_y * camera_x;
 
@@ -372,23 +491,154 @@ static void draw_walls(const struct Player *p)
         if (dist < 1e-4)
             dist = 1e-4;
 
-        int wall_h = (int)(screen_h / dist);
-        int top = screen_h / 2 - wall_h / 2;
-        int bottom = top + wall_h;
-        if (top < 0)
-            top = 0;
-        if (bottom > screen_h)
-            bottom = screen_h;
+        /* Point touché le long de la face, de 0 à 1 d'un bord de la case à l'autre. */
+        double wall_x = hit_y_side ? p->x + dist * ray_x : p->y + dist * ray_y;
+        wall_x -= floor(wall_x);
 
-        /* Faces nord/sud plus sombres pour le relief, puis brouillard. */
-        struct Color c = wall_color(cell);
-        if (hit_y_side)
-            c = mix(c, (struct Color){0, 0, 0}, 0.35);
-        c = mix(c, FOG_COLOR, dist / FOG_DISTANCE);
+        /* Largeur d'un pixel sur la face, en cases : de combien wall_x
+         * avance quand on passe à la colonne voisine. Elle grandit avec la
+         * distance, et quand on voit le mur de biais. */
+        double cross = p->plane_x * ray_y - p->plane_y * ray_x;
+        double ray_across = hit_y_side ? ray_y : ray_x;
+        double pixel_size = 2.0 * dist * fabs(cross) / (fabs(ray_across) * screen_w) + 1e-9;
 
-        for (int y = top; y < bottom; y++)
-            pixels[y * screen_w + x] = c;
+        /* Tube vertical au bord de la case. On regarde la case voisine le
+         * long de la face : si elle est vide ou d'une autre couleur (coin
+         * saillant), ou si un mur se dresse devant elle (coin rentrant),
+         * c'est une vraie arête, qui brille fort. Sinon c'est une simple
+         * jointure entre deux cases du même mur, à peine visible. */
+        int side = wall_x < 0.5 ? -1 : 1;
+        int next_x = cell_x + (hit_y_side ? side : 0), next_y = cell_y + (hit_y_side ? 0 : side);
+        int front_x = hit_y_side ? 0 : -step_x, front_y = hit_y_side ? -step_y : 0;
+        bool edge = map_at(next_x, next_y) != cell || map_at(next_x + front_x, next_y + front_y) != ' ';
+        double vertical = neon_line(fmin(wall_x, 1 - wall_x) / pixel_size) * (edge ? 1.0 : PANEL_LINE);
+
+        double fog = clamp01(dist / FOG_DISTANCE);
+        struct Color color = wall_color(cell);
+        /* Faces nord/sud plus sombres que les faces est/ouest : c'est ce qui donne le relief. */
+        struct Color face = mix((struct Color){0, 0, 0}, color, WALL_FACE * (hit_y_side ? 0.55 : 1.0));
+
+        /* Le mur va de top à bottom (en pixels, avec décimales). */
+        double half = 0.5 * focal / dist;
+        double top = horizon - half, bottom = horizon + half;
+        int y_start = top < 0 ? 0 : (int)top;
+        int y_end = bottom > screen_h ? screen_h : (int)ceil(bottom);
+
+        for (int y = y_start; y < y_end; y++) {
+            double center = y + 0.5;
+            if (center < top || center >= bottom)
+                continue;
+            /* Tubes horizontaux : le haut et le bas du mur. */
+            double k = fmax(vertical, neon_line(fmin(center - top, bottom - center)));
+            /* Le cœur d'un tube est presque blanc, sa lueur garde la couleur. */
+            struct Color c = mix(add(face, color, k), WHITE, k * 0.45);
+            pixels[y * screen_w + x] = mix(c, FOG_COLOR, fog);
+            /* Le mur cache le sol derrière lui, et donc aussi sa lueur. */
+            light[y * screen_w + x] = (struct Light){0, 0, 0};
+            add_light(x, y, color, k * (1 - fog));
+        }
     }
+}
+
+/* Le halo (« bloom ») : le calque de lumière est flouté, puis ajouté à
+ * l'image, et les néons semblent rayonner. Le flou se fait en deux passes,
+ * horizontale puis verticale : bien plus rapide qu'un flou en carré, pour
+ * le même résultat. Les poids suivent une courbe en cloche (gaussienne) :
+ * le pixel lui-même compte le plus, ses voisins de moins en moins. */
+static void apply_bloom(void)
+{
+    static const float weights[] = {0.161f, 0.149f, 0.117f, 0.078f, 0.045f, 0.022f, 0.009f};
+    const int radius = (int)(sizeof weights / sizeof weights[0]) - 1;
+
+    /* Passe horizontale : light → light_tmp. */
+    for (int y = 0; y < screen_h; y++) {
+        for (int x = 0; x < screen_w; x++) {
+            struct Light sum = {0, 0, 0};
+            for (int i = -radius; i <= radius; i++) {
+                int sx = x + i;
+                if (sx < 0 || sx >= screen_w)
+                    continue;
+                const struct Light *l = &light[y * screen_w + sx];
+                float w = weights[i < 0 ? -i : i];
+                sum.r += l->r * w;
+                sum.g += l->g * w;
+                sum.b += l->b * w;
+            }
+            light_tmp[y * screen_w + x] = sum;
+        }
+    }
+
+    /* Passe verticale : light_tmp → ajoutée à l'image. */
+    for (int y = 0; y < screen_h; y++) {
+        for (int x = 0; x < screen_w; x++) {
+            struct Light sum = {0, 0, 0};
+            for (int i = -radius; i <= radius; i++) {
+                int sy = y + i;
+                if (sy < 0 || sy >= screen_h)
+                    continue;
+                const struct Light *l = &light_tmp[sy * screen_w + x];
+                float w = weights[i < 0 ? -i : i];
+                sum.r += l->r * w;
+                sum.g += l->g * w;
+                sum.b += l->b * w;
+            }
+            struct Color *px = &pixels[y * screen_w + x];
+            px->r = (unsigned char)fmin(255.0, px->r + sum.r * BLOOM_STRENGTH);
+            px->g = (unsigned char)fmin(255.0, px->g + sum.g * BLOOM_STRENGTH);
+            px->b = (unsigned char)fmin(255.0, px->b + sum.b * BLOOM_STRENGTH);
+        }
+    }
+}
+
+/* Allume le pixel de la minimap qui correspond au point (x, y) de la carte. */
+static void minimap_plot(int left, int top, int scale, double x, double y, struct Color c)
+{
+    int px = left + (int)(x * scale), py = top + (int)(y * scale);
+    if (px >= 0 && py >= 0 && px < screen_w && py < screen_h)
+        pixels[py * screen_w + px] = c;
+}
+
+/* La minimap, en haut à droite : une case = un carré de 1 ou 2 pixels de
+ * côté. Elle n'apparaît que si elle tient à l'aise sur l'écran. */
+static void draw_minimap(const struct Player *p)
+{
+    int scale = 2;
+    while (scale > 0 && (MAP_W * scale > screen_w / 4 || MAP_H * scale > screen_h / 2))
+        scale--;
+    if (scale == 0)
+        return;
+    int left = screen_w - MAP_W * scale - 2, top = 2; /* top = 2 : sous le bandeau d'infos */
+
+    for (int my = 0; my < MAP_H; my++) {
+        for (int mx = 0; mx < MAP_W; mx++) {
+            char cell = map[my][mx];
+            for (int sy = 0; sy < scale; sy++) {
+                for (int sx = 0; sx < scale; sx++) {
+                    struct Color *px = &pixels[(top + my * scale + sy) * screen_w + left + mx * scale + sx];
+                    /* Case vide : la scène assombrie, comme une vitre fumée. Mur : sa couleur. */
+                    *px = cell == ' ' ? mix(*px, (struct Color){0, 0, 0}, 0.75)
+                                      : mix((struct Color){0, 0, 0}, wall_color(cell), 0.8);
+                }
+            }
+        }
+    }
+
+    /* La direction du regard : quelques points devant le joueur, puis le joueur. */
+    for (double t = 0.5; t <= 2.0; t += 0.5 / scale)
+        minimap_plot(left, top, scale, p->x + p->dir_x * t, p->y + p->dir_y * t, MINIMAP_VIEW);
+    minimap_plot(left, top, scale, p->x, p->y, MINIMAP_PLAYER);
+}
+
+/* Dessine une image complète de la scène dans « pixels ». */
+static void render_scene(const struct Player *p)
+{
+    /* Calque de lumière remis au noir. Des octets à 0 donnent bien 0.0 pour
+     * un float (norme IEEE 754, celle de tous les ordinateurs actuels). */
+    memset(light, 0, sizeof *light * (size_t)screen_w * (size_t)screen_h);
+    draw_floor_and_ceiling(p);
+    draw_walls(p);
+    apply_bloom();
+    draw_minimap(p);
 }
 
 /* ===================================================================
@@ -756,8 +1006,7 @@ int main(void)
             out_printf("\x1b[2J"); /* taille changée : on efface tout */
         resize_screen(cols, rows);
 
-        draw_floor_and_ceiling();
-        draw_walls(&player);
+        render_scene(&player);
         draw_pixels();
 
         /* Bandeau d'infos, seulement s'il tient sur la largeur. */
@@ -787,6 +1036,8 @@ int main(void)
     }
 
     free(pixels);
+    free(light);
+    free(light_tmp);
     free(out_data);
     return 0; /* restore_terminal() est appelée ici, grâce à atexit() */
 }
